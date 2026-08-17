@@ -53,6 +53,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store read is inconclusive (MOB-1717).
 - A transaction whose raw bytes cannot be read during resubmission is skipped and retried next
   sync cycle instead of aborting the sync pass with `TransactionNotFoundException` (MOB-1717).
+- Fetching subtree roots against a lightwalletd that doesn't recognize the Ironwood pool (or whose
+  backing node predates NU6.3) no longer burns all retry attempts or logs fatal-looking errors; the
+  server response is now recognized and tolerated on the first attempt. Genuine Ironwood fetch
+  failures are recorded the same way as Sapling/Orchard failures instead of being silently
+  tolerated, and a failed Orchard or Ironwood fetch can no longer be masked by a successful Sapling
+  fetch into a false-positive spend-before-sync result (MOB-1541).
 
 ## [3.0.2] - 2026-08-13
 
