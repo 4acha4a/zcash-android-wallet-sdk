@@ -1211,12 +1211,15 @@ class CompactBlockProcessor internal constructor(
          *   substring, not the more generic `"shielded protocol"`, so an INVALID_ARGUMENT failure for an
          *   unrelated reason isn't mistaken for an unrecognized pool.
          * - UNIMPLEMENTED (12) is matched defensively for other indexers (e.g. Zaino) that haven't implemented
-         *   the pool at all.
+         *   the pool at all — but only for pools other than Sapling. Sapling is the baseline pool every
+         *   spend-before-sync-capable server must serve, so a Sapling UNIMPLEMENTED means the server doesn't
+         *   implement the `GetSubtreeRoots` RPC at all and is treated as a genuine failure rather than being
+         *   silently tolerated as "no Sapling roots".
          *
          * UNKNOWN is gRPC's catch-all, so the code alone can't distinguish an unrecognized pool from any other
          * unknown error; the description text is required to discriminate.
          */
-        private fun Response.Failure<*>.isUnknownPoolFailure(): Boolean =
+        private fun Response.Failure<*>.isUnknownPoolFailure(shieldedProtocol: ShieldedProtocolEnum): Boolean =
             when (code) {
                 GRPC_CODE_UNKNOWN -> {
                     description?.contains("unrecognized shielded protocol", ignoreCase = true) == true
@@ -1227,7 +1230,7 @@ class CompactBlockProcessor internal constructor(
                 }
 
                 GRPC_CODE_UNIMPLEMENTED -> {
-                    true
+                    shieldedProtocol != ShieldedProtocolEnum.SAPLING
                 }
 
                 else -> {
@@ -1431,9 +1434,10 @@ class CompactBlockProcessor internal constructor(
         /*
          * Fetching the subtree roots of a pool differs only in which pool is targeted, so the three per-pool
          * retry loops share one implementation. A server that doesn't recognize the requested pool (see
-         * [isUnknownPoolFailure]) is tolerated uniformly across all three pools: it's logged at info level
-         * and the fetch completes with an empty root list on the first attempt, without retrying and without
-         * being recorded as a failure. Any other failure is recorded identically for all three pools - there
+         * [isUnknownPoolFailure], which exempts Sapling from the UNIMPLEMENTED tolerance) is tolerated:
+         * it's logged at info level and the fetch completes with an empty root list on the first attempt,
+         * without retrying and without being recorded as a failure. Any other failure is recorded identically for all three pools -
+         * there
          * is no longer a pool-specific blanket tolerance. This resolves the transitional Ironwood-only
          * tolerance debt tracked in https://github.com/zcash/zcash-android-wallet-sdk/issues/2061.
          */
@@ -1460,7 +1464,7 @@ class CompactBlockProcessor internal constructor(
                                 }
 
                                 is Response.Failure -> {
-                                    if (response.isUnknownPoolFailure()) {
+                                    if (response.isUnknownPoolFailure(shieldedProtocol)) {
                                         Twig.info {
                                             "$shieldedProtocol subtree roots are not provided by this server" +
                                                 " (code: ${response.code}, description: ${response.description});" +

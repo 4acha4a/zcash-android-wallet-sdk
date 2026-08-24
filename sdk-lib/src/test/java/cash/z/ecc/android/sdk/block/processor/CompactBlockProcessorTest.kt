@@ -50,6 +50,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@Suppress("LargeClass")
 class CompactBlockProcessorTest {
     @Test
     fun should_refresh_preparation_test() {
@@ -479,6 +480,36 @@ class CompactBlockProcessorTest {
                         ServiceMode.Direct
                     )
             }
+        }
+
+    @Test
+    fun sapling_unimplemented_is_a_genuine_failure_not_an_unknown_pool() =
+        runTest {
+            val downloader = mock(CompactBlockDownloader::class.java)
+            val processor = subtreeRootsProcessor()
+
+            stubSubtreeRoots(
+                downloader,
+                SAPLING_START_INDEX,
+                ShieldedProtocolEnum.SAPLING,
+                flowOf(otherFailure(code = 12, description = null)),
+                flowOf(otherFailure(code = 12, description = null)),
+                flowOf(otherFailure(code = 12, description = null))
+            )
+            stubSubtreeRoots(downloader, ORCHARD_START_INDEX, ShieldedProtocolEnum.ORCHARD, successFlow())
+            stubSubtreeRoots(downloader, IRONWOOD_START_INDEX, ShieldedProtocolEnum.IRONWOOD, successFlow())
+
+            val result =
+                processor.getSubtreeRoots(
+                    downloader = downloader,
+                    saplingStartIndex = SAPLING_START_INDEX,
+                    orchardStartIndex = ORCHARD_START_INDEX,
+                    ironwoodStartIndex = IRONWOOD_START_INDEX
+                )
+
+            assertTrue(result is GetSubtreeRootsResult.OtherFailure)
+            verify(downloader, times(3))
+                .getSubtreeRoots(SAPLING_START_INDEX, ShieldedProtocolEnum.SAPLING, UInt.MIN_VALUE, ServiceMode.Direct)
         }
 
     @Test
