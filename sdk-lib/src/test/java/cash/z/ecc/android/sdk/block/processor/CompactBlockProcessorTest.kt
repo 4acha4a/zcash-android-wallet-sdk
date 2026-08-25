@@ -483,6 +483,67 @@ class CompactBlockProcessorTest {
         }
 
     @Test
+    fun sapling_unknown_code_is_tolerated_as_an_unknown_pool_failure() =
+        runTest {
+            val downloader = mock(CompactBlockDownloader::class.java)
+            val processor = subtreeRootsProcessor()
+
+            stubSubtreeRoots(
+                downloader,
+                SAPLING_START_INDEX,
+                ShieldedProtocolEnum.SAPLING,
+                flowOf(unknownFailure(code = 2, description = "unrecognized shielded protocol"))
+            )
+            stubSubtreeRoots(downloader, ORCHARD_START_INDEX, ShieldedProtocolEnum.ORCHARD, successFlow())
+            stubSubtreeRoots(downloader, IRONWOOD_START_INDEX, ShieldedProtocolEnum.IRONWOOD, successFlow())
+
+            val result =
+                processor.getSubtreeRoots(
+                    downloader = downloader,
+                    saplingStartIndex = SAPLING_START_INDEX,
+                    orchardStartIndex = ORCHARD_START_INDEX,
+                    ironwoodStartIndex = IRONWOOD_START_INDEX
+                )
+
+            assertEquals(GetSubtreeRootsResult.Linear, result)
+            verify(downloader, times(1))
+                .getSubtreeRoots(SAPLING_START_INDEX, ShieldedProtocolEnum.SAPLING, UInt.MIN_VALUE, ServiceMode.Direct)
+        }
+
+    @Test
+    fun sapling_invalid_argument_is_tolerated_as_an_unknown_pool_failure() =
+        runTest {
+            val downloader = mock(CompactBlockDownloader::class.java)
+            val processor = subtreeRootsProcessor()
+
+            stubSubtreeRoots(
+                downloader,
+                SAPLING_START_INDEX,
+                ShieldedProtocolEnum.SAPLING,
+                flowOf(
+                    otherFailure(
+                        code = 3,
+                        description = "GetSubtreeRoots: bad shielded protocol specifier error: x"
+                    )
+                )
+            )
+            stubSubtreeRoots(downloader, ORCHARD_START_INDEX, ShieldedProtocolEnum.ORCHARD, successFlow())
+            stubSubtreeRoots(downloader, IRONWOOD_START_INDEX, ShieldedProtocolEnum.IRONWOOD, successFlow())
+
+            val result =
+                processor.getSubtreeRoots(
+                    downloader = downloader,
+                    saplingStartIndex = SAPLING_START_INDEX,
+                    orchardStartIndex = ORCHARD_START_INDEX,
+                    ironwoodStartIndex = IRONWOOD_START_INDEX
+                )
+
+            assertEquals(GetSubtreeRootsResult.Linear, result)
+            verify(downloader, times(1))
+                .getSubtreeRoots(SAPLING_START_INDEX, ShieldedProtocolEnum.SAPLING, UInt.MIN_VALUE, ServiceMode.Direct)
+        }
+
+    @Test
     fun sapling_unimplemented_is_a_genuine_failure_not_an_unknown_pool() =
         runTest {
             val downloader = mock(CompactBlockDownloader::class.java)
