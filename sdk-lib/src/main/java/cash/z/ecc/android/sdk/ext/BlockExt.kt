@@ -13,8 +13,7 @@ fun ByteArray.toHex(): String {
     return sb.toString()
 }
 
-// Not used within the SDK, but is used by the Wallet app
-@Suppress("unused", "MagicNumber")
+@Suppress("MagicNumber")
 fun String.fromHex(): ByteArray {
     require(length % HEX_CHARS_PER_BYTE == 0) {
         "Hex string must have an even length, got $length"

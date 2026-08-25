@@ -18,7 +18,7 @@ import cash.z.ecc.android.sdk.internal.SdkDispatchers
 import cash.z.ecc.android.sdk.internal.Twig
 import cash.z.ecc.android.sdk.internal.TypesafeBackend
 import cash.z.ecc.android.sdk.internal.db.ReadOnlySupportSqliteOpenHelper
-import cash.z.ecc.android.sdk.internal.model.Checkpoint
+import cash.z.ecc.android.sdk.internal.model.TreeState
 import cash.z.ecc.android.sdk.model.AccountCreateSetup
 import cash.z.ecc.android.sdk.model.BlockHeight
 import cash.z.ecc.android.sdk.model.FirstClassByteArray
@@ -120,14 +120,14 @@ internal class DerivedDataDb private constructor(
     companion object {
         // Database migrations are managed by librustzcash.  This is a hard-coded value to ensure that Android's
         // SqliteOpenHelper is happy
-        private const val DATABASE_VERSION = 8
+        internal const val DATABASE_VERSION = 8
 
         @Suppress("LongParameterList")
         suspend fun new(
             context: Context,
             backend: TypesafeBackend,
             databaseFile: File,
-            checkpoint: Checkpoint,
+            treeState: TreeState,
             recoverUntil: BlockHeight?,
             setup: AccountCreateSetup?,
         ): DerivedDataDb {
@@ -154,7 +154,7 @@ internal class DerivedDataDb private constructor(
                         keySource = setup.keySource,
                         recoverUntil = recoverUntil,
                         seed = setup.seed,
-                        treeState = checkpoint.treeState()
+                        treeState = treeState
                     )
                 }.onFailure {
                     Twig.error(it) { "Create account failed." }

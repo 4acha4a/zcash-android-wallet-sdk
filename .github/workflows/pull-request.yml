@@ -10,15 +10,17 @@ name: Pull Request
 on:
   pull_request:
     paths-ignore:
-      - '.github/ISSUE_TEMPLATE/*'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - 'LICENSE'
-      - 'README.md'
-      - 'docs/**'
+      - ".github/ISSUE_TEMPLATE/*"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "README.md"
+      - "docs/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Default to no token scopes at all; every job that needs one declares it below.
+permissions: {}
 
 jobs:
   validate_gradle_wrapper:
@@ -28,16 +30,22 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Release tooling tests
         timeout-minutes: 1
         run: ./scripts/tests/run-tests.sh
       - name: Gradle Wrapper Validation
         timeout-minutes: 1
-        uses: gradle/actions/wrapper-validation@v6
+        uses: gradle/actions/wrapper-validation@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
   check_firebase_secrets:
     runs-on: ubuntu-latest
+    # Reads no repository content — it only reports whether secrets are configured.
+    permissions: {}
     outputs:
       has-secrets: ${{ steps.check_firebase_secrets.outputs.defined }}
     steps:
@@ -57,7 +65,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 10
@@ -67,6 +79,25 @@ jobs:
         run: |
           make check-properties
 
+  static_analysis_shellcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        timeout-minutes: 1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
+      - name: Shellcheck
+        timeout-minutes: 1
+        run: |
+          find . -name "*.sh" -not -path "./.git/*" \
+            -not -path "./build/*" -not -path "./.gradle/*" \
+            -print -exec shellcheck {} +
+
   static_analysis_detekt:
     needs: validate_gradle_wrapper
     runs-on: ubuntu-latest
@@ -75,7 +106,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -96,7 +131,7 @@ jobs:
           zip -r ${REPORTS_ZIP_PATH} . -i build/reports/detekt/\*
       - name: Upload Artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Detekt static analysis results
@@ -110,7 +145,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -131,7 +170,7 @@ jobs:
           zip -r ${REPORTS_ZIP_PATH} . -i build/reports/ktlint/\*
       - name: Upload Artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Ktlint static analysis results
@@ -145,13 +184,19 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
         uses: ./.github/actions/setup
+        with:
+          rust-cache: true
       - name: Android Lint
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           # Disable minify, since it makes lint run faster
           ORG_GRADLE_PROJECT_IS_MINIFY_APP_ENABLED: false
@@ -168,7 +213,7 @@ jobs:
           zip -r ${LINT_ZIP_PATH} . -i \*build/reports/\*
       - name: Upload Artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Android Lint static analysis results
@@ -184,7 +229,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -208,7 +257,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -233,7 +286,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -256,26 +313,82 @@ jobs:
       - name: Checkout
         timeout-minutes: 1
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          # The check only reads Cargo.lock and curls a public URL, so it needs no
+          # credential; keep it out of .git/config.
+          persist-credentials: false
       - name: Check proposal.proto matches the pinned zcash_client_backend
         timeout-minutes: 5
         run: |
           ./scripts/update-proposal-proto.sh --check
 
-  test_android_modules_unit:
-    needs: [ validate_gradle_wrapper ]
+  # Licence gate for the native library: every crate in backend-lib's dependency graph must
+  # carry a licence from the permissive-only allow-list in backend-lib/deny.toml, and every git
+  # source must be one that file names. cargo-deny only resolves the lockfile (`cargo metadata`),
+  # so the job installs a pinned, checksummed release binary and lets rustup pick the toolchain
+  # from rust-toolchain.toml; it needs neither the Gradle caches nor an Android build.
+  check_native_licenses:
+    needs: validate_gradle_wrapper
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
+      - name: Install cargo-deny
+        timeout-minutes: 3
+        env:
+          CARGO_DENY_VERSION: "0.20.2"
+          CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+        run: |
+          set -euo pipefail
+          archive="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "${archive}.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${archive}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  ${archive}.tar.gz" | sha256sum --check --strict
+          tar -xzf "${archive}.tar.gz" "${archive}/cargo-deny"
+          install -m 0755 "${archive}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+          rm -rf "${archive}" "${archive}.tar.gz"
+          cargo deny --version
+      - name: cargo deny
+        timeout-minutes: 15
+        run: |
+          make deny-rust
+
+  test_android_modules_unit:
+    needs: [validate_gradle_wrapper]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        timeout-minutes: 1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
         uses: ./.github/actions/setup
+        with:
+          rust-cache: true
+      # 60 rather than the usual 30: this branch re-enables shielded voting, which
+      # turns on orchard's `unstable-voting-circuits` and pulls the halo2 voting
+      # circuits into the native build. `make test-unit` builds the crate for all
+      # four ABIs, so that lands four times over. The step also cannot start warm:
+      # the Rust cache key hashes backend-lib/Cargo.toml and build.gradle.kts, both
+      # modified here, and the prefix-matched fallback cache was built without
+      # `--cfg zcash_voting`, so every crate rebuilds. Measured at 30m+ against
+      # ~28m for the same job on a voting-disabled branch.
       - name: Build and test
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           make test-unit
       - name: Collect Artifacts
@@ -290,7 +403,7 @@ jobs:
           zip -r ${TEST_RESULTS_ZIP_PATH} . -i \*/build/test-results/\* \*/build/reports/\*
       - name: Upload Artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Test Android modules with Unit Tests
@@ -327,11 +440,17 @@ jobs:
   #   steps:
   #     - name: Checkout
   #       timeout-minutes: 1
-  #       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+  #       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+  #       with:
+  #         # No job here pushes or otherwise re-uses the checkout credential, so keep it
+  #         # out of .git/config where it would be picked up by artifact uploads.
+  #         persist-credentials: false
   #     - name: Setup
   #       id: setup
   #       timeout-minutes: 30
   #       uses: ./.github/actions/setup
+  #       with:
+  #         rust-cache: true
   #     - name: Build
   #       timeout-minutes: 30
   #       run: |
@@ -344,7 +463,7 @@ jobs:
   #         project_id: ${{ vars.FIREBASE_TEST_LAB_PROJECT }}
   #         service_account: ${{ secrets.FIREBASE_TEST_LAB_SERVICE_ACCOUNT }}
   #         workload_identity_provider: ${{ secrets.FIREBASE_TEST_LAB_WORKLOAD_IDENTITY_PROVIDER }}
-  #         access_token_lifetime: '1200s'
+  #         access_token_lifetime: "1200s"
   #     - name: Test
   #       timeout-minutes: 30
   #       env:
@@ -367,7 +486,7 @@ jobs:
   #         zip -r ${TEST_RESULTS_ZIP_PATH} . -i build/fladle/\* \*/build/outputs/androidTest-results/\*
   #     - name: Upload Artifacts
   #       if: ${{ always() }}
-  #       uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+  #       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
   #       timeout-minutes: 1
   #       with:
   #         name: Test Android modules with FTL results
@@ -384,7 +503,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       # ubuntu-latest exposes /dev/kvm, but the default udev rules do not grant
       # the runner user access to it. This rule opens it so the managed-device
       # emulator can use KVM acceleration instead of falling back to software.
@@ -398,6 +521,8 @@ jobs:
         id: setup
         timeout-minutes: 30
         uses: ./.github/actions/setup
+        with:
+          rust-cache: true
       # The hosted runner's Android SDK does not include the emulator package,
       # which a Gradle Managed Device requires. AGP auto-installs the system
       # image but not the emulator, so without this the pixel2MinSetup task
@@ -442,7 +567,7 @@ jobs:
             \*/build/reports/androidTests/\*
       - name: Upload Artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Test Android modules with emulator results
@@ -456,11 +581,17 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
         uses: ./.github/actions/setup
+        with:
+          rust-cache: true
       # A fake signing key to satisfy creating a "release" build
       - name: Export Signing Key
         env:
@@ -476,7 +607,7 @@ jobs:
           ORG_GRADLE_PROJECT_ZCASH_RELEASE_KEY_ALIAS: androiddebugkey
           ORG_GRADLE_PROJECT_ZCASH_RELEASE_KEY_ALIAS_PASSWORD: android
         run: |
-           make build-release
+          make build-release
       - name: Collect Artifacts
         timeout-minutes: 1
         env:
@@ -488,7 +619,7 @@ jobs:
           zip -r ${BINARIES_ZIP_PATH} . -i demo-app/build/outputs/apk/\*/release/\*.apk demo-app/build/outputs/bundle/\*/release/\*.aab
           zip -r ${MAPPINGS_ZIP_PATH} . -i demo-app/build/outputs/mapping/\*/mapping.txt
       - name: Upload Artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         timeout-minutes: 1
         with:
           name: Demo app release binaries
@@ -509,7 +640,11 @@ jobs:
     steps:
       - name: Checkout
         timeout-minutes: 1
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          # No job here pushes or otherwise re-uses the checkout credential, so keep it
+          # out of .git/config where it would be picked up by artifact uploads.
+          persist-credentials: false
       - name: Setup
         id: setup
         timeout-minutes: 30
@@ -522,7 +657,7 @@ jobs:
           project_id: ${{ vars.FIREBASE_TEST_LAB_PROJECT }}
           service_account: ${{ secrets.FIREBASE_TEST_LAB_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.FIREBASE_TEST_LAB_WORKLOAD_IDENTITY_PROVIDER }}
-          access_token_lifetime: '900s'
+          access_token_lifetime: "900s"
       - name: Download a single artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:

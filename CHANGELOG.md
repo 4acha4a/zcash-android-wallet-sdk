@@ -6,6 +6,131 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-25
+
+### Added
+- `OrchardMigrationSdk`, an engine that plans, signs and drives an account's ZIP 318 Orchard to
+  Ironwood pool migration as a schedule of privacy-preserving transfers — in contrast to
+  `Synchronizer.proposeOrchardToIronwoodMigration` (unchanged in this release), which crosses
+  the turnstile in a single transaction whose value is the account's entire Orchard balance. An
+  instance is bound to one account and obtained from `OrchardMigrationSdk.new`, deliberately
+  independent of any `Synchronizer` so that its `isSyncBlocked()` flow can gate synchronizer
+  construction. In outline:
+  - Planning and signing: `proposeMigrationTransfers` (optionally preceded by `prepareNoteSplit`
+    and followed by `proposeMigrationTransfersFromSplit`) renders a `MigrationSchedule` for
+    review, and `signAndStoreMigrationSchedule` commits it; the engine refuses to sign a plan
+    that a later proposal superseded. Wallets without a software spending key can instead export
+    unsigned PCZTs for every step, or sign a whole schedule in one Keystone animated-QR round
+    trip (`buildKeystoneSignBatchQrParts` and its decode/apply counterparts).
+  - Driving: an app-owned background worker calls `nextStep()` for one `MigrationAdvanceStep` at
+    a time, wakes sync at the heights `syncWakeupSchedule()` reports, proves
+    sign-now/prove-later transfers via `finalizeReadyTransfers()`, and broadcasts through
+    `executeNextPendingTransfer` under `NetworkPrivacyOptions` (Tor, and a submission endpoint
+    separate from the sync endpoint). `getMigrationState`, `getMigrationTransferStates` and
+    `getMigrationSummary` expose the engine's persisted state; transfers are identified by stable
+    `Long` ids, never by list position. PCZTs are carried as `Pczt`, and
+    `TransferResult.Success` carries a `TransactionId`.
+  - **Privacy:** transfer amounts are randomized canonical denominations anchored on shared
+    network-wide bucket boundaries, so a transfer is not distinguishable by amount or anchor
+    from other ZIP 318 traffic. A sub-denomination residual is excluded from the schedule by
+    default, because migrating it requires an identifying amount;
+    `lockRemainingOrchardBalance()` marks it unspendable so it cannot later be swept into a
+    transaction that reveals it. `isSyncBlocked()` is advisory: the SDK never pauses a live
+    synchronizer on its behalf, so a wallet that wants sync traffic decorrelated from a
+    migration broadcast must close its synchronizer, or defer constructing one, while the flow
+    is true.
+- `Synchronizer.getRecipients()` and `Synchronizer.getTransactionOutputs()`, which return the
+  recipients and outputs of every transaction in one batched query, keyed by `TransactionId`.
+- `Synchronizer.preloadNativeLibrary()`, which loads the native library ahead of time so that
+  synchronizer construction does not pay for it.
+- `Synchronizer.getWalletDbPathForVoting()`, the wallet database path for future shielded-voting
+  tooling. Shielded voting is unavailable in this release, so nothing can act on the path yet.
+- `InitializeException.ImportAccountCheckpointsNotReadyException`, thrown by
+  `Synchronizer.importAccountByUfvk` in place of `ImportAccountException` when the failure is a
+  transient cross-pool checkpoint mismatch rather than wallet-database corruption. Treat it as
+  retryable once more blocks are scanned.
+- `WalletBalance.locked`, the value of notes committed to be spent by a transaction proposal or
+  PCZT (for example a migration transfer's inputs once it is proved): owned funds the wallet
+  will not select for another spend. It is excluded from `total` and `pending`, which keep their
+  existing meaning; a caller that wants a grand total must add `locked` itself. The parameter
+  defaults to zero, so existing construction compiles unchanged, but as a `data class` component
+  it participates in `equals`, `copy` and destructuring.
+- `Proposal.usesOrchardInputs()`, whether the proposal directly spends any Orchard note.
+- `TransactionSubmitResult.Failure.isTorFailure` (default `false`), true when the failure
+  originated in Tor circuit setup rather than at the server, so a wallet can route to
+  Tor-specific recovery instead of a generic submit-failure UI.
+- `CompactBlockProcessor.enhanceTransactionDetails` and the per-transaction `enhanceTransaction`
+  step now emit structured logs at each step of an enhance cycle — request counts and types,
+  fetch response shape, the decision taken, and per-request errors. Logs are keyed by opaque
+  per-request correlation ids and contain no transaction ids, addresses, or other PII, so
+  production logs are debuggable for stuck-transaction reports without exposing
+  user-identifying data.
+
+### Changed
+- `Synchronizer.broadcaster` no longer has a default implementation: any implementer or test
+  fake must now provide it. `SdkSynchronizer` (what `Synchronizer.new` returns) already does, so
+  callers are unaffected.
+- `Synchronizer` gains `getRecipients()`, `getTransactionOutputs()` and
+  `getWalletDbPathForVoting()` as abstract members, which any implementer or test fake must now
+  provide.
+- `Synchronizer.getRecipients(transactionOverview)` and
+  `Synchronizer.getTransactionOutputs(transactionOverview)` no longer filter out wallet-internal
+  rows: a self-transfer such as a pool migration now appears as a recipient carrying the
+  wallet's own address and a non-null `accountUuid`, and change outputs are included among the
+  outputs.
+- New wallets now initialize from a tree state fetched from the server 100 blocks below the
+  chain tip instead of from the bundled checkpoint, so a wallet with no transaction history
+  starts near the tip and scans far fewer blocks while staying reorg-safe. If that fetch does
+  not complete within 5 seconds, initialization falls back to the bundled checkpoint. Wallet
+  restore is unaffected.
+- The Tor runtime is now created on first use rather than during synchronizer construction.
+  `Synchronizer.initializationError` therefore no longer reports
+  `InitializationError.TOR_NOT_AVAILABLE` (the constant remains for compatibility); a Tor
+  failure now surfaces from the individual call that needed Tor.
+- `Synchronizer.getAccounts`, `Synchronizer.createAccount` and
+  `Synchronizer.importAccountByUfvk` now rethrow `CancellationException` instead of wrapping it
+  in an `InitializeException`, so cancelling the calling coroutine no longer surfaces as an
+  account-operation failure.
+- `FiatCurrencyConversion.fiatCurrency` is now a constructor parameter rather than a fixed
+  property, and can carry a currency other than `FiatCurrency.USD`. It now participates in
+  `equals`, `hashCode`, `toString` and `copy`: two conversions differing only in currency are
+  unequal, and destructuring gains a third component. Two-argument construction still compiles
+  and defaults to `USD`.
+- On testnet, ZIP 318 anchor buckets are 12 blocks instead of 144, and migration broadcast
+  delays scale down with them, so a pool migration can be exercised end to end in minutes
+  rather than days. Mainnet is unchanged and uses the ZIP 318 parameters.
+- Updated checkpoints for mainnet and testnet.
+
+### Fixed
+- Resubmission no longer permanently drops a pending submit plan for a wallet-created
+  transaction missing from the derived history view: the wallet store is consulted before
+  pruning — the plan is kept while the transaction exists and is unexpired (or
+  expiry-disabled), and kept when the store read is inconclusive (MOB-1717).
+- A transaction whose raw bytes cannot be read during resubmission is skipped and retried next
+  sync cycle instead of aborting the sync pass with `TransactionNotFoundException` (MOB-1717).
+- Fetching subtree roots against a lightwalletd that doesn't recognize the Ironwood pool (or
+  whose backing node predates NU6.3) no longer burns all retry attempts or logs fatal-looking
+  errors; the server response is now recognized and tolerated on the first attempt. Genuine
+  Ironwood fetch failures are recorded the same way as Sapling/Orchard failures instead of
+  being silently tolerated, and a failed Orchard or Ironwood fetch can no longer be masked by a
+  successful Sapling fetch into a false-positive spend-before-sync result (MOB-1541).
+- `Synchronizer.createProposedTransactions` and `Synchronizer.createTransactionFromPczt` now
+  register the transactions they create in the pending-submit-plan store, so the sync loop's
+  resubmission tick can no longer race an in-flight submit with a second broadcast of the same
+  transaction. Every submit path also records its endpoint after the submit RPC returns, in a
+  non-cancellable step, so a coroutine cancellation mid-submit cannot strand the plan.
+- `Synchronizer.submitTransaction` (and `Broadcaster.submit`) now verifies a submit failure
+  against the server before surfacing it: when the submit RPC returns a non-zero error code
+  that is not a gRPC-layer failure, the SDK asks the same lightwalletd whether it knows the
+  transaction, and reports `TransactionSubmitResult.Success` if it is in the mempool or chain.
+  This covers "already known" responses from any backend — Zebra's `InMempool` and
+  `AlreadyQueued`, zcashd's `RPC_VERIFY_ALREADY_IN_CHAIN` — without depending on
+  backend-specific codes or message text.
+- `CompactBlockProcessor` no longer crashes with an `IllegalArgumentException` from
+  `PercentDecimal` when both the scan and recovery progress ranges are empty (e.g. right after
+  importing an account whose birthday is at the chain tip). The combined progress ratio now
+  uses the same zero-denominator semantics as the individual ratios: an empty range means 100%.
+
 ## [2.7.0] - 2026-08-20
 
 ### Added
@@ -157,10 +282,102 @@ The remainder were picked up from the librustzcash update:
   indefinitely, and could thereby stall the exchange-rate fetch, which aggregates
   several exchanges.
 
+## [2.6.6] - 2026-07-25
+
+### Added
+- Support for the Ironwood (NU6.3) shielded pool: per-pool balances, output counts and
+  subtree roots, and the Ironwood `ShieldedProtocol` variant.
+
+### Changed
+- Migrated to `zcash_client_backend 0.24`, `zcash_client_sqlite 0.22`, `zcash_protocol 0.10`,
+  `zcash_primitives`/`zcash_proofs 0.29`, `orchard 0.15`, `pczt 0.8`, `zcash_transparent 0.9`.
+- Updated checkpoints for mainnet and testnet.
+
+### Internal
+- The shielded-voting native surface (`zcash_voting`, the `chp-voting` feature and `mod voting`)
+  is commented out, so no `Java_..._VotingRustBackend_*` JNI symbols are emitted.
+
+
+## [2.6.5] - 2026-06-19
+
+### Fixed
+- Fixed `InvalidParameterName` error in `delete_account` for accounts with cross-account transactions ([librustzcash#2426](https://github.com/zcash/librustzcash/pull/2426)).
+
+## [2.6.4] - 2026-06-16
+
+### Fixed
+- Fixed ignore of `CancellationException` which is important for coroutines.
+
+### Changed
+- Updated checkpoints for mainnet and testnet.
+
+## [2.6.3] - 2026-06-15
+
+### Changed
+- Updated checkpoints for mainnet and testnet.
+
+## [2.6.2] - 2026-06-09
+
+### Added
+- New wallets now fetch a recent, reorg-safe tree state from the lightwalletd server,
+  reducing unnecessary block scanning for wallets with no transaction history.
+  Initialization falls back to the bundled checkpoint if the fetch does not complete
+  within 5 seconds.
+- `FiatCurrencyConversion.fiatCurrency` is now a constructor parameter (defaulting
+  to `FiatCurrency.USD`) rather than a fixed USD-only property, so a conversion can
+  carry a currency other than USD.
+
+### Internal
+- Unpinned `zcash_voting` in `Cargo.toml` in favor of the lockfile.
+
+## [2.6.1] - 2026-06-03
+
+### Changed
+- Migrated to NU 6.2, updating the librustzcash crates to `zcash_client_backend 0.23`,
+  `zcash_client_sqlite 0.21`, `zcash_keys 0.14`, `zcash_primitives 0.28` and
+  `zcash_protocol 0.9`.
+
+### Fixed
+- The librustzcash update incorporates the fixes for the Orchard proof soundness
+  vulnerability GHSA-ww9q-8r59-xv46 and the Orchard non-canonical proof size issue
+  GHSA-2x4w-pxqw-58v9.
+
+## [2.6.0] - 2026-05-26
+
+### Added
+- `Synchronizer.broadcaster` API for creating transactions without immediate
+  submission and submitting stored transactions to selected lightwalletd
+  endpoints. Automatic retry uses the endpoints submitted through the
+  broadcaster.
+- `Synchronizer.fullyScannedHeight` and `Synchronizer.getTreeState` accessors
+  for snapshot-height consumers.
+
+### Changed
+- `String.fromHex` now rejects odd-length and non-hex input instead of silently coercing malformed
+  strings.
+
+### Internal
+- Added internal `VotingRustBackend` / `TypesafeVotingBackend` plumbing for future shielded voting backend work.
+- Added internal shielded voting recovery and share-tracking persistence for replaying,
+  retrying, and confirming delegation and vote submission workflows.
+- Split the internal governance PCZT API into `buildGovernancePczt` (explicit Orchard
+  FVK + raw hotkey address, for hardware wallets such as Keystone) and
+  `buildGovernancePcztFromSeed` (UFVK + wallet seed + hotkey seed, preserving the
+  UFVK<>walletSeed validation invariant for software wallets). `buildAndProveDelegation`
+  now takes the raw hotkey address directly, and a new `deriveHotkeyRawAddress` helper
+  exposes raw-address derivation to callers that do not retain the hotkey seed.
+- Pinned `orchard` to `=0.13.1` with `unstable-voting-circuits` to match `zcash_voting` / `voting-circuits` requirements.
+- Pinned `zcash_voting` to `=0.10.1`.
+
 ## [2.5.2] - 2026-06-03
 
 ### Changed
 - Migrated to NU 6.2
+
+### Fixed
+- The librustzcash update incorporates the fixes for the Orchard proof soundness
+  vulnerability GHSA-ww9q-8r59-xv46 and the Orchard non-canonical proof size issue
+  GHSA-2x4w-pxqw-58v9.
 
 ## [2.5.1] - 2026-05-14
 
@@ -170,15 +387,13 @@ The remainder were picked up from the librustzcash update:
 
 ## [2.5.0] - 2026-05-01
 
-### Changed
-- `Synchronizer.importAccountByUfvk` now calls `TypesafeBackend.rewindToChainState` after importing
-  an account. This enables imported accounts to discover their history and funds, at the cost of
-  other accounts being temporarily blocked by a short resync (specifically rescanning the incomplete
-  shard at the tip).
-
 ### Fixed
 - Fixed `rewindToHeight` semantics
-- Updated `zcash_client_sqlite` to 0.20.2
+- Updated `zcash_client_sqlite` to 0.20.2. With this release, account import
+  will trigger a re-scan from the birthday of the imported account, allowing
+  imported accounts to discover their history and funds, at the cost of other
+  accounts being temporarily blocked by a short resync (specifically rescanning
+  the incomplete shard at the tip).
 
 ## [2.4.8] - 2025-04-02
 

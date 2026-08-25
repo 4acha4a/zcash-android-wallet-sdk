@@ -1,5 +1,7 @@
 import com.google.protobuf.gradle.id
 import com.google.protobuf.gradle.proto
+import org.gradle.api.GradleException
+import java.io.File
 
 plugins {
     id("org.mozilla.rust-android-gradle.rust-android")
@@ -13,6 +15,51 @@ plugins {
     id("maven-publish")
     id("signing")
     id("zcash-sdk.publishing-conventions")
+}
+
+val requestedTaskNames = gradle.startParameter.taskNames
+
+fun String.requestsAndroidTestNativeFixtures() =
+    contains("AndroidTest", ignoreCase = true) ||
+        contains("EmulatorWtf", ignoreCase = true) ||
+        contains("connected", ignoreCase = true)
+
+fun String.requestsProductionNativeArtifact(): Boolean {
+    val taskName = substringAfterLast(":")
+    val isAssembleTask = taskName.startsWith("assemble", ignoreCase = true)
+    val isBundleTask = taskName.startsWith("bundle", ignoreCase = true)
+    val isReleaseTask = taskName.contains("Release", ignoreCase = true)
+    val isBenchmarkTask = taskName.contains("Benchmark", ignoreCase = true)
+
+    return taskName.equals("assemble", ignoreCase = true) ||
+        taskName.equals("build", ignoreCase = true) ||
+        taskName.startsWith("publish", ignoreCase = true) ||
+        isAssembleTask && (isReleaseTask || isBenchmarkTask) ||
+        isBundleTask && (isReleaseTask || isBenchmarkTask)
+}
+
+val enableAndroidTestNativeFixtures =
+    requestedTaskNames.any { taskName ->
+        taskName.requestsAndroidTestNativeFixtures()
+    }
+
+val productionNativeArtifactTasksWithAndroidFixtures =
+    if (enableAndroidTestNativeFixtures) {
+        requestedTaskNames.filter { taskName ->
+            taskName.requestsProductionNativeArtifact()
+        }
+    } else {
+        emptyList()
+    }
+
+if (productionNativeArtifactTasksWithAndroidFixtures.isNotEmpty()) {
+    throw GradleException(
+        "Do not run Android test tasks and production native artifact tasks in the same " +
+            "Gradle invocation. Android test tasks enable the android-test-fixtures Cargo " +
+            "feature globally for backend-lib native builds. Split these into separate " +
+            "commands. Conflicting production task(s): " +
+            productionNativeArtifactTasksWithAndroidFixtures.joinToString()
+    )
 }
 
 // Publishing information
@@ -79,12 +126,32 @@ cargo {
         "x86_64" to minSdkVersion,
     )
     profile = "release"
+    extraCargoBuildArguments = run {
+        // Test-only fixture exports; never part of a production native build.
+        val features =
+            buildList {
+                if (enableAndroidTestNativeFixtures) add("android-test-fixtures")
+            }
+        if (features.isEmpty()) emptyList() else listOf("--features", features.joinToString(","))
+    }
     prebuiltToolchains = true
     // To force the compiler to use the given page size
     // See the new Android 16 KB page size requirement for more details:
     // https://developer.android.com/about/versions/15/behavior-changes-all#16-kb
     exec = { spec, _ ->
         spec.environment["RUST_ANDROID_GRADLE_CC_LINK_ARG"] = "-Wl,-z,max-page-size=16384"
+    }
+    // GUI-launched IDEs (Android Studio from Finder/Dock) inherit a minimal PATH that omits
+    // ~/.cargo/bin, so the rustup `cargo`/`rustc` shims are not found and cargoBuild fails with
+    // "Cannot run program 'rustc'". When rustup is installed in its default location, point the
+    // plugin at the absolute shim paths so the native build no longer depends on the daemon's PATH.
+    File(System.getProperty("user.home"), ".cargo/bin").let { cargoBin ->
+        val rustc = File(cargoBin, "rustc")
+        val cargo = File(cargoBin, "cargo")
+        if (rustc.exists() && cargo.exists()) {
+            rustcCommand = rustc.absolutePath
+            cargoCommand = cargo.absolutePath
+        }
     }
 }
 
@@ -100,6 +167,13 @@ project.afterEvaluate {
             dependsOn("cargoBuild", "cargoBuildArm64", "cargoBuildX86", "cargoBuildX86_64")
             // Fix for mergeDebugJniLibFolders UP-TO-DATE
             inputs.dir(layout.buildDirectory.dir("rustJniLibs/android").get().asFile)
+        }
+    tasks
+        .matching {
+            name.startsWith("cargoBuild")
+        }
+        .configureEach {
+            inputs.property("androidTestNativeFixtures", enableAndroidTestNativeFixtures)
         }
 }
 
@@ -142,6 +216,7 @@ dependencies {
 
     // Tests
     testImplementation(libs.kotlin.test)
+    testImplementation(libs.kotlinx.coroutines.test)
 
     androidTestImplementation(libs.androidx.multidex)
     androidTestImplementation(libs.androidx.test.runner)

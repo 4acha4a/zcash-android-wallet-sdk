@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength", "ThrowsCount")
+
 package cash.z.ecc.android.sdk.block.processor
 
 import androidx.annotation.VisibleForTesting
@@ -25,7 +27,6 @@ import cash.z.ecc.android.sdk.exception.CompactBlockProcessorException.Mismatche
 import cash.z.ecc.android.sdk.exception.CompactBlockProcessorException.MismatchedNetwork
 import cash.z.ecc.android.sdk.exception.InitializeException
 import cash.z.ecc.android.sdk.exception.LightWalletException
-import cash.z.ecc.android.sdk.exception.TransactionEncoderException
 import cash.z.ecc.android.sdk.ext.ZcashSdk.MAX_BACKOFF_INTERVAL
 import cash.z.ecc.android.sdk.ext.ZcashSdk.POLL_INTERVAL
 import cash.z.ecc.android.sdk.ext.ZcashSdk.POLL_INTERVAL_SHORT
@@ -45,6 +46,7 @@ import cash.z.ecc.android.sdk.internal.metrics.TraceScope
 import cash.z.ecc.android.sdk.internal.metrics.withTraceScope
 import cash.z.ecc.android.sdk.internal.model.BlockBatch
 import cash.z.ecc.android.sdk.internal.model.DbTransactionOverview
+import cash.z.ecc.android.sdk.internal.model.EncodedTransaction
 import cash.z.ecc.android.sdk.internal.model.JniBlockMeta
 import cash.z.ecc.android.sdk.internal.model.OutputStatusFilter
 import cash.z.ecc.android.sdk.internal.model.RecoveryProgress
@@ -78,6 +80,7 @@ import cash.z.ecc.android.sdk.model.TransactionId
 import cash.z.ecc.android.sdk.model.TransactionSubmitResult
 import cash.z.ecc.android.sdk.model.UnifiedAddressRequest
 import cash.z.ecc.android.sdk.model.Zatoshi
+import cash.z.ecc.android.sdk.model.ZcashNetwork
 import co.electriccoin.lightwallet.client.ServiceMode
 import co.electriccoin.lightwallet.client.model.BlockHeightUnsafe
 import co.electriccoin.lightwallet.client.model.GetAddressUtxosReplyUnsafe
@@ -110,6 +113,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.min
@@ -476,7 +480,10 @@ class CompactBlockProcessor internal constructor(
 
     suspend fun enhanceTransaction(txId: TransactionId) {
         processingMutex.withLockLogged("processNewBlocks") {
+            val reqId = UUID.randomUUID().toString().take(LOG_CORRELATION_ID_LENGTH)
             enhanceTransaction(
+                reqId = reqId,
+                typeName = "enhancement",
                 transactionRequest = TransactionDataRequest.Enhancement(txId.value.byteArray),
                 backend = backend,
                 downloader = downloader,
@@ -1174,6 +1181,64 @@ class CompactBlockProcessor internal constructor(
         internal const val GET_SUBTREE_ROOTS_RETRIES = 3
 
         /**
+         * gRPC status code for UNKNOWN failures, i.e. the server returned a generic error with no matching
+         * gRPC status. sdk-lib has no `io.grpc.Status` on its compile classpath, so this mirrors
+         * `io.grpc.Status.Code.UNKNOWN`'s numeric value.
+         */
+        private const val GRPC_CODE_UNKNOWN = 2
+
+        /**
+         * gRPC status code for INVALID_ARGUMENT failures. Mirrors `io.grpc.Status.Code.INVALID_ARGUMENT`.
+         */
+        private const val GRPC_CODE_INVALID_ARGUMENT = 3
+
+        /**
+         * gRPC status code for UNIMPLEMENTED failures. Mirrors `io.grpc.Status.Code.UNIMPLEMENTED`.
+         */
+        private const val GRPC_CODE_UNIMPLEMENTED = 12
+
+        /**
+         * Classifies a subtree roots [Response.Failure] as coming from a server that doesn't recognize the
+         * requested shielded protocol, rather than as a genuine fetch failure. Covers the failure shapes
+         * empirically observed against lightwalletd:
+         *
+         * - A deployed pre-Ironwood lightwalletd (v0.4.x): its `GetSubtreeRoots` handler's pool switch returns
+         *   a plain Go error (`errors.New("unrecognized shielded protocol")`), which surfaces as gRPC UNKNOWN
+         *   (2) with that description.
+         * - An upgraded lightwalletd whose backing node is pre-NU6.3:
+         *   `status.Errorf(codes.InvalidArgument, "GetSubtreeRoots: bad shielded protocol specifier error: ...")`,
+         *   which surfaces as INVALID_ARGUMENT (3) and is matched on the `"bad shielded protocol specifier"`
+         *   substring, not the more generic `"shielded protocol"`, so an INVALID_ARGUMENT failure for an
+         *   unrelated reason isn't mistaken for an unrecognized pool.
+         * - UNIMPLEMENTED (12) is matched defensively for other indexers (e.g. Zaino) that haven't implemented
+         *   the pool at all — but only for pools other than Sapling. Sapling is the baseline pool every
+         *   spend-before-sync-capable server must serve, so a Sapling UNIMPLEMENTED means the server doesn't
+         *   implement the `GetSubtreeRoots` RPC at all and is treated as a genuine failure rather than being
+         *   silently tolerated as "no Sapling roots".
+         *
+         * UNKNOWN is gRPC's catch-all, so the code alone can't distinguish an unrecognized pool from any other
+         * unknown error; the description text is required to discriminate.
+         */
+        private fun Response.Failure<*>.isUnknownPoolFailure(shieldedProtocol: ShieldedProtocolEnum): Boolean =
+            when (code) {
+                GRPC_CODE_UNKNOWN -> {
+                    description?.contains("unrecognized shielded protocol", ignoreCase = true) == true
+                }
+
+                GRPC_CODE_INVALID_ARGUMENT -> {
+                    description?.contains("bad shielded protocol specifier", ignoreCase = true) == true
+                }
+
+                GRPC_CODE_UNIMPLEMENTED -> {
+                    shieldedProtocol != ShieldedProtocolEnum.SAPLING
+                }
+
+                else -> {
+                    false
+                }
+            }
+
+        /**
          * The theoretical maximum number of blocks in a reorg, due to other bottlenecks in the protocol design.
          */
         internal const val MAX_REORG_SIZE = 100
@@ -1185,6 +1250,23 @@ class CompactBlockProcessor internal constructor(
          * of overhead during scanning.
          */
         private const val SYNC_BATCH_SIZE = 1000
+
+        /** Mainnet ZIP 318 anchor-bucket interval; see [anchorGridIntervalFor]. */
+        private const val ANCHOR_GRID_INTERVAL_MAINNET = 144L
+
+        /** Testnet ZIP 318 anchor-bucket interval, on the compressed grid; see [anchorGridIntervalFor]. */
+        private const val ANCHOR_GRID_INTERVAL_TESTNET = 12L
+
+        /**
+         * See [clampBatchEndToAnchorGrid]. The ZIP 318 anchor-bucket interval per network —
+         * mirrors the engine's `AnchorBucketInterval` config (144 mainnet, 12 on the compressed
+         * testnet grid, SDK PR #2042).
+         */
+        internal fun anchorGridIntervalFor(network: ZcashNetwork): Long =
+            if (network == ZcashNetwork.Testnet) ANCHOR_GRID_INTERVAL_TESTNET else ANCHOR_GRID_INTERVAL_MAINNET
+
+        /** See [clampBatchEndToAnchorGrid] — only grid points this close to the sync range end get their own batch cut. */
+        private const val ANCHOR_GRID_RECENT_WINDOW = 300L
 
         /**
          * This is the same as [SYNC_BATCH_SIZE] but meant to be used in the Zcash sandblasting periods
@@ -1349,30 +1431,23 @@ class CompactBlockProcessor internal constructor(
         Twig.debug { "Fetching SubtreeRoots..." }
         val traceScope = TraceScope("CompactBlockProcessor.getSubtreeRoots")
 
-        var result: GetSubtreeRootsResult = GetSubtreeRootsResult.Linear
-
-        // Fetching the subtree roots of a pool differs only in which pool is targeted and in
-        // whether a failure is recorded, so the three per-pool retry loops share one implementation.
-        //
-        // Sapling and Orchard record into [result] exactly as they did before Ironwood existed.
-        // Only the Ironwood fetch tolerates failure: no deployed lightwalletd answers for a pool
-        // that activates at NU6.3, so until the server population is upgraded this request fails
-        // for every wallet, on every sync start. Recording that would set a value the trailing
-        // `saplingSubtreeRootList.isNotEmpty()` block discards anyway; tolerating it keeps the
-        // absence of Ironwood roots from reading as a fetch failure.
-        //
-        // This tolerance is transitional and must not outlive the server rollout, or a genuine
-        // Ironwood fetch fault will be ignored and spend-before-sync will proceed on an
-        // incomplete Ironwood commitment tree. Tracked in
-        // https://github.com/zcash/zcash-android-wallet-sdk/issues/2061.
+        /*
+         * Fetching the subtree roots of a pool differs only in which pool is targeted, so the three per-pool
+         * retry loops share one implementation. A server that doesn't recognize the requested pool (see
+         * [isUnknownPoolFailure], which exempts Sapling from the UNIMPLEMENTED tolerance) is tolerated:
+         * it's logged at info level and the fetch completes with an empty root list on the first attempt,
+         * without retrying and without being recorded as a failure. Any other failure is recorded identically for all three pools -
+         * there
+         * is no longer a pool-specific blanket tolerance. This resolves the transitional Ironwood-only
+         * tolerance debt tracked in https://github.com/zcash/zcash-android-wallet-sdk/issues/2061.
+         */
         suspend fun fetchSubtreeRoots(
             startIndex: UInt,
-            shieldedProtocol: ShieldedProtocolEnum,
-            onFailure: (GetSubtreeRootsResult) -> Unit
-        ): List<SubtreeRoot> {
-            var roots: List<SubtreeRoot> = emptyList()
+            shieldedProtocol: ShieldedProtocolEnum
+        ): PoolFetchOutcome {
+            var outcome: PoolFetchOutcome = PoolFetchOutcome.Roots(emptyList())
             retryUpToAndContinue(GET_SUBTREE_ROOTS_RETRIES) {
-                roots =
+                val roots =
                     downloader
                         .getSubtreeRoots(
                             startIndex = startIndex,
@@ -1389,30 +1464,42 @@ class CompactBlockProcessor internal constructor(
                                 }
 
                                 is Response.Failure -> {
-                                    val error =
-                                        LightWalletException.GetSubtreeRootsException(
-                                            response.code,
-                                            response.description,
-                                            response.toThrowable()
-                                        )
-                                    if (response is Response.Failure.Server.Unavailable) {
-                                        Twig.error {
-                                            "Fetching $shieldedProtocol SubtreeRoot failed due to server" +
-                                                " communication problem with failure: ${response.toThrowable()}"
+                                    if (response.isUnknownPoolFailure(shieldedProtocol)) {
+                                        Twig.info {
+                                            "$shieldedProtocol subtree roots are not provided by this server" +
+                                                " (code: ${response.code}, description: ${response.description});" +
+                                                " proceeding without them"
                                         }
-                                        onFailure(GetSubtreeRootsResult.FailureConnection)
                                     } else {
-                                        Twig.error {
-                                            "Fetching $shieldedProtocol SubtreeRoot failed with failure:" +
-                                                " ${response.toThrowable()}"
+                                        val error =
+                                            LightWalletException.GetSubtreeRootsException(
+                                                response.code,
+                                                response.description,
+                                                response.toThrowable()
+                                            )
+                                        if (response is Response.Failure.Server.Unavailable) {
+                                            Twig.error {
+                                                "Fetching $shieldedProtocol SubtreeRoot failed due to server" +
+                                                    " communication problem with failure: ${response.toThrowable()}"
+                                            }
+                                            outcome =
+                                                PoolFetchOutcome.Failed(GetSubtreeRootsResult.FailureConnection)
+                                        } else {
+                                            Twig.error {
+                                                "Fetching $shieldedProtocol SubtreeRoot failed with failure:" +
+                                                    " ${response.toThrowable()}"
+                                            }
+                                            outcome =
+                                                PoolFetchOutcome.Failed(GetSubtreeRootsResult.OtherFailure(error))
                                         }
-                                        onFailure(GetSubtreeRootsResult.OtherFailure(error))
+                                        /*
+                                         * Deliberately not ending [traceScope] here: `retryUpToAndContinue`
+                                         * swallows this after the last attempt, so control always reaches the
+                                         * single `traceScope.end()` below. Ending it per failed attempt closed
+                                         * the scope early and logged "ended more than once" for each retry.
+                                         */
+                                        throw error
                                     }
-                                    // Deliberately not ending [traceScope] here: `retryUpToAndContinue`
-                                    // swallows this after the last attempt, so control always reaches the
-                                    // single `traceScope.end()` below. Ending it per failed attempt closed
-                                    // the scope early and logged "ended more than once" for each retry.
-                                    throw error
                                 }
                             }
                         }.filterIsInstance<Response.Success<SubtreeRootUnsafe>>()
@@ -1422,33 +1509,51 @@ class CompactBlockProcessor internal constructor(
                         .map {
                             SubtreeRoot.new(it)
                         }
+                outcome = PoolFetchOutcome.Roots(roots)
             }
-            return roots
+            return outcome
         }
 
-        val saplingSubtreeRootList =
-            fetchSubtreeRoots(saplingStartIndex, ShieldedProtocolEnum.SAPLING) { failure -> result = failure }
-        val orchardSubtreeRootList =
-            fetchSubtreeRoots(orchardStartIndex, ShieldedProtocolEnum.ORCHARD) { failure -> result = failure }
-        val ironwoodSubtreeRootList =
-            fetchSubtreeRoots(ironwoodStartIndex, ShieldedProtocolEnum.IRONWOOD) { /* tolerated; see above */ }
+        val saplingOutcome = fetchSubtreeRoots(saplingStartIndex, ShieldedProtocolEnum.SAPLING)
+        val orchardOutcome = fetchSubtreeRoots(orchardStartIndex, ShieldedProtocolEnum.ORCHARD)
+        val ironwoodOutcome = fetchSubtreeRoots(ironwoodStartIndex, ShieldedProtocolEnum.IRONWOOD)
 
-        // Intentionally omitting [orchardSubtreeRootList]/[ironwoodSubtreeRootList], e.g., for Mainnet usage, we
-        // could check it, but on custom networks without NU5/NU6.3 activation, it wouldn't work. If the Orchard or
-        // Ironwood subtree roots are empty, it's technically still ok (both activate after Sapling, so on a network
-        // that doesn't have them activated yet, this would behave correctly). In contrast, if the Sapling subtree
-        // roots are empty, we cannot do SbS at all.
-        if (saplingSubtreeRootList.isNotEmpty()) {
-            result =
-                GetSubtreeRootsResult.SpendBeforeSync(
-                    saplingStartIndex,
-                    saplingSubtreeRootList,
-                    orchardStartIndex,
-                    orchardSubtreeRootList,
-                    ironwoodStartIndex,
-                    ironwoodSubtreeRootList
-                )
-        }
+        val failures = listOf(saplingOutcome, orchardOutcome, ironwoodOutcome).filterIsInstance<PoolFetchOutcome.Failed>()
+
+        val result =
+            when {
+                failures.any { it.failure == GetSubtreeRootsResult.FailureConnection } -> {
+                    GetSubtreeRootsResult.FailureConnection
+                }
+
+                failures.isNotEmpty() -> {
+                    failures.first().failure
+                }
+
+                else -> {
+                    /*
+                     * Intentionally omitting the Orchard/Ironwood root lists here, e.g., for Mainnet usage, we
+                     * could check them, but on custom networks without NU5/NU6.3 activation, that wouldn't work.
+                     * If the Orchard or Ironwood subtree roots are empty, it's technically still ok (both
+                     * activate after Sapling, so on a network that doesn't have them activated yet, this would
+                     * behave correctly). In contrast, if the Sapling subtree roots are empty, we cannot do SbS
+                     * at all.
+                     */
+                    val saplingRoots = (saplingOutcome as PoolFetchOutcome.Roots).list
+                    if (saplingRoots.isEmpty()) {
+                        GetSubtreeRootsResult.Linear
+                    } else {
+                        GetSubtreeRootsResult.SpendBeforeSync(
+                            saplingStartIndex,
+                            saplingRoots,
+                            orchardStartIndex,
+                            (orchardOutcome as PoolFetchOutcome.Roots).list,
+                            ironwoodStartIndex,
+                            (ironwoodOutcome as PoolFetchOutcome.Roots).list
+                        )
+                    }
+                }
+            }
 
         traceScope.end()
         return result
@@ -1806,6 +1911,29 @@ class CompactBlockProcessor internal constructor(
             }
         }
 
+    /**
+     * Cuts a scan batch short so it ends exactly ON a ZIP 318 anchor-bucket grid multiple when one
+     * falls inside the batch near the chain tip. The tree checkpoint the scanner writes at each
+     * batch end is the ONLY way a checkpoint (and therefore a provable anchor,
+     * `root_at_checkpoint_id`) exists at a given height — a batch that scans PAST a grid boundary
+     * leaves no checkpoint on it, and every migration transfer anchored to that boundary then
+     * fails proving with AnchorNotFound forever (observed live: batch [4210440..4210446] left no
+     * checkpoint at boundary 4210440). Restricted to [ANCHOR_GRID_RECENT_WINDOW] below the sync
+     * range end so a multi-thousand-block catch-up doesn't shatter into bucket-sized batches:
+     * proofs only ever target boundaries near the tip, and checkpoint retention prunes old ones
+     * anyway.
+     */
+    private fun clampBatchEndToAnchorGrid(
+        start: Long,
+        end: Long,
+        syncRangeEnd: Long,
+        gridInterval: Long
+    ): Long {
+        if (syncRangeEnd - end > ANCHOR_GRID_RECENT_WINDOW) return end
+        val largestMultipleAtOrBelowEnd = (end / gridInterval) * gridInterval
+        return if (largestMultipleAtOrBelowEnd in start until end) largestMultipleAtOrBelowEnd else end
+    }
+
     private fun calculateBatchEnd(
         start: Long,
         rangeEnd: Long,
@@ -1850,6 +1978,14 @@ class CompactBlockProcessor internal constructor(
                                 batchSize = SYNC_BATCH_SMALL_SIZE
                             )
                     }
+
+                    end =
+                        clampBatchEndToAnchorGrid(
+                            start = start,
+                            end = end,
+                            syncRangeEnd = syncRange.endInclusive.value,
+                            gridInterval = anchorGridIntervalFor(network)
+                        )
 
                     val range = BlockHeight.new(start)..BlockHeight.new(end)
                     add(
@@ -2046,6 +2182,7 @@ class CompactBlockProcessor internal constructor(
     }
 
     @VisibleForTesting
+    @Suppress("LongMethod")
     internal fun enhanceTransactionDetails(
         range: ClosedRange<BlockHeight>,
         repository: DerivedDataRepository,
@@ -2074,7 +2211,8 @@ class CompactBlockProcessor internal constructor(
             if (newTxDataRequests.isEmpty()) {
                 Twig.debug { "No new transactions found in $range" }
             } else {
-                Twig.debug { "Enhancing ${newTxDataRequests.size} transaction(s)!" }
+                val cycleId = UUID.randomUUID().toString().take(LOG_CORRELATION_ID_LENGTH)
+                Twig.info { "BlockEnhancer cycle started [$cycleId] requests=${newTxDataRequests.size}" }
 
                 // If the first transaction has been added
                 // Ideally, we could remove this last reference to the transaction view from the enhancing logic
@@ -2083,14 +2221,19 @@ class CompactBlockProcessor internal constructor(
                     emit(SyncingResult.UpdateBirthday)
                 }
 
-                newTxDataRequests.forEach {
-                    Twig.debug { "Transaction data request: $it" }
+                newTxDataRequests.forEachIndexed { index, request ->
+                    val reqId = "$cycleId.$index"
+                    val typeName = request.typeName
 
-                    when (it) {
+                    when (request) {
                         is TransactionDataRequest.EnhancementRequired -> {
-                            val trxEnhanceResult = enhanceTransaction(it, backend, downloader, sdkFlags)
+                            val trxEnhanceResult =
+                                enhanceTransaction(reqId, typeName, request, backend, downloader, sdkFlags)
                             if (trxEnhanceResult is SyncingResult.EnhanceFailed) {
-                                Twig.error(trxEnhanceResult.exception) { "Encountered transaction enhancing error" }
+                                val errorType = trxEnhanceResult.exception::class.simpleName
+                                Twig.error {
+                                    "BlockEnhancer [$reqId] type=$typeName failed error_type=$errorType"
+                                }
                                 emit(trxEnhanceResult)
                                 // We intentionally do not terminate the batch enhancing here, just reporting it
                             }
@@ -2099,12 +2242,13 @@ class CompactBlockProcessor internal constructor(
                         is TransactionDataRequest.TransactionsInvolvingAddress -> {
                             val processTaddrTxidsResult =
                                 processTransparentAddressTxids(
-                                    transactionRequest = it,
+                                    transactionRequest = request,
                                     downloader = downloader
                                 )
                             if (processTaddrTxidsResult is SyncingResult.EnhanceFailed) {
-                                Twig.error(processTaddrTxidsResult.exception) {
-                                    "Encountered SpendsFromAddress transactions error"
+                                val errorType = processTaddrTxidsResult.exception::class.simpleName
+                                Twig.error {
+                                    "BlockEnhancer [$reqId] type=$typeName failed error_type=$errorType"
                                 }
                                 emit(processTaddrTxidsResult)
                                 // We intentionally do not terminate the batch enhancing here, just reporting it
@@ -2112,9 +2256,10 @@ class CompactBlockProcessor internal constructor(
                         }
                     }
                 }
+
+                Twig.info { "BlockEnhancer cycle complete [$cycleId]" }
             }
 
-            Twig.debug { "Done enhancing transaction details" }
             emit(SyncingResult.EnhanceSuccess)
         }
 
@@ -2228,12 +2373,14 @@ class CompactBlockProcessor internal constructor(
 
     @Suppress("LongMethod")
     private suspend fun enhanceTransaction(
+        reqId: String,
+        typeName: String,
         transactionRequest: TransactionDataRequest.EnhancementRequired,
         backend: TypesafeBackend,
         downloader: CompactBlockDownloader,
         sdkFlags: SdkFlags
     ): SyncingResult {
-        Twig.debug { "Starting enhancing transaction: txid: ${transactionRequest.txIdString()}" }
+        Twig.info { "BlockEnhancer [$reqId] type=$typeName start" }
 
         val traceScope = TraceScope("CompactBlockProcessor.enhanceTransaction")
         val result =
@@ -2246,15 +2393,15 @@ class CompactBlockProcessor internal constructor(
                         sdkFlags = sdkFlags
                     )
 
-                Twig.debug { "Transaction fetched: $rawTransactionUnsafe" }
+                val hasTx = rawTransactionUnsafe != null
+                val hasMined = rawTransactionUnsafe is RawTransactionUnsafe.MainChain
+                Twig.info {
+                    "BlockEnhancer [$reqId] fetch returned has_tx=$hasTx has_mined_height=$hasMined"
+                }
 
                 // We need to distinct between the two possible states of [transactionRequest]
                 when (transactionRequest) {
                     is TransactionDataRequest.GetStatus -> {
-                        Twig.debug {
-                            "Resolving TransactionDataRequest.GetStatus by setting status of " +
-                                "transaction: txid: ${transactionRequest.txIdString()}"
-                        }
                         val status =
                             rawTransactionUnsafe?.toTransactionStatus()
                                 ?: TransactionStatus.TxidNotRecognized
@@ -2263,35 +2410,35 @@ class CompactBlockProcessor internal constructor(
                             status = status,
                             backend = backend
                         )
+                        val statusName = status::class.simpleName
+                        Twig.info {
+                            "BlockEnhancer [$reqId] setTransactionStatus called (status=$statusName)"
+                        }
                     }
 
                     is TransactionDataRequest.Enhancement -> {
                         if (rawTransactionUnsafe == null) {
-                            Twig.debug {
-                                "Resolving TransactionDataRequest.Enhancement by setting status of " +
-                                    "transaction. Txid not recognized: ${transactionRequest.txIdString()}"
-                            }
                             setTransactionStatus(
                                 transactionRawId = transactionRequest.txid,
                                 status = TransactionStatus.TxidNotRecognized,
                                 backend = backend
                             )
-                        } else {
-                            Twig.debug {
-                                "Resolving TransactionDataRequest.Enhancement by decrypting and storing " +
-                                    "transaction: txid: ${transactionRequest.txIdString()}"
+                            Twig.info {
+                                "BlockEnhancer [$reqId] setTransactionStatus called (txidNotRecognized)"
                             }
-
+                        } else {
                             decryptSemaphore.withLock {
                                 decryptTransaction(
                                     rawTransaction = RawTransaction.new(rawTransactionUnsafe = rawTransactionUnsafe),
                                 )
                             }
+                            Twig.info {
+                                "BlockEnhancer [$reqId] decryptAndStoreTransaction called has_mined_height=$hasMined"
+                            }
                         }
                     }
                 }
 
-                Twig.debug { "Done enhancing transaction: txid: ${transactionRequest.txIdString()}" }
                 SyncingResult.EnhanceSuccess
             } catch (exception: CompactBlockProcessorException.EnhanceTransactionError) {
                 SyncingResult.EnhanceFailed(null, exception)
@@ -2468,17 +2615,34 @@ class CompactBlockProcessor internal constructor(
             recoveryProgress?.getSafeRatio()?.let { PercentDecimal(it) } ?: PercentDecimal.ZERO_PERCENT
         }
 
-        // [_progress] is calculated as sum numerator divided by denominators if [recoveryProgress] is not null
+        // [_progress] is calculated as sum of numerators divided by sum of denominators if [recoveryProgress] is
+        // not null. A zero combined denominator means 100% (same semantics as [Progress.getSafeRatio]) — a raw
+        // division would produce NaN and fail [PercentDecimal]'s range requirement, e.g. for a freshly imported
+        // account whose scan and recovery ranges are both empty.
         _progress.value =
             PercentDecimal(
                 if (recoveryProgress == null) {
-                    scanProgress.numerator.toFloat() /
-                        scanProgress.denominator.toFloat()
+                    scanProgress.getSafeRatio()
                 } else {
-                    (scanProgress.numerator.toFloat() + recoveryProgress.numerator.toFloat()) /
-                        (scanProgress.denominator.toFloat() + recoveryProgress.denominator.toFloat())
+                    getSafeCombinedRatio(scanProgress, recoveryProgress)
                 }
             )
+    }
+
+    /**
+     * Combined scan+recovery progress ratio with the same safety semantics as [Progress.getSafeRatio]: a zero
+     * denominator is interpreted as 100% progress and any out-of-range value is treated as 0.
+     */
+    private fun getSafeCombinedRatio(
+        scanProgress: ScanProgress,
+        recoveryProgress: RecoveryProgress
+    ): Float {
+        val denominator = scanProgress.denominator + recoveryProgress.denominator
+        if (denominator <= 0L) {
+            return 1f
+        }
+        val ratio = (scanProgress.numerator + recoveryProgress.numerator).toFloat() / denominator.toFloat()
+        return if (ratio < 0f || ratio > 1f) 0f else ratio
     }
 
     /**
@@ -2668,15 +2832,17 @@ class CompactBlockProcessor internal constructor(
         } ?: lowerBoundHeight
 
     /**
-     * This function resubmits the unmined sent transactions that are still within the expiry window. It can produce
-     * [TransactionEncoderException.TransactionNotFoundException] in case the transaction in not found in the database,
-     * but networking issues are not reported, it is retried in the next sync cycle instead.
+     * This function resubmits the unmined sent transactions that are still within the expiry window. A transaction
+     * whose raw bytes cannot be read from the wallet store is skipped and retried in the next sync cycle instead of
+     * aborting this pass; networking issues are likewise not reported and are retried in the next sync cycle.
+     *
+     * Candidate discovery stays view-driven: a wallet-created transaction that hasn't yet been projected into the
+     * derived history view is not synthesized as a resubmission candidate here. Its submit plan is merely kept
+     * around (see [findTransactionsEligibleForResubmission]) until the transaction becomes view-visible or the app
+     * retries via [cash.z.ecc.android.sdk.Broadcaster].
      *
      * @param blockHeight The block height to which transactions should be compared (usually the current chain tip)
-     *
-     * @throws TransactionEncoderException.TransactionNotFoundException in case the encoded transaction is not found
      */
-    @Throws(TransactionEncoderException.TransactionNotFoundException::class)
     private suspend fun resubmitUnminedTransactions(blockHeight: BlockHeight?) {
         // Run the check only in case we have already obtained the current chain tip
         if (blockHeight == null) {
@@ -2687,61 +2853,70 @@ class CompactBlockProcessor internal constructor(
         Twig.debug { "Trx resubmission: ${list.size}, ${list.joinToString(separator = ", ") { it.txIdString() }}" }
 
         if (list.isNotEmpty()) {
-            list.forEach { transaction ->
-                val submitPlan = pendingSubmitPlanStore.getSubmitPlan(transaction.rawId)
-                if (submitPlan == PendingSubmitPlanStore.StoredSubmitPlan.AwaitingPlan) {
-                    Twig.debug {
-                        "Trx resubmission: Skipping ${transaction.txIdString()} until a submit plan is registered"
-                    }
-                    return@forEach
-                }
-
-                val trxForResubmission =
-                    repository.findEncodedTransactionByTxId(transaction.rawId)
-                        ?: throw TransactionEncoderException.TransactionNotFoundException(transaction.rawId)
-
-                Twig.debug { "Trx resubmission: Found: ${trxForResubmission.txIdString()}" }
-
-                retryUpToAndContinue(TRANSACTION_RESUBMIT_RETRIES) {
-                    val response =
-                        when (submitPlan) {
-                            null -> {
-                                txManager.submit(trxForResubmission)
-                            }
-
-                            is PendingSubmitPlanStore.StoredSubmitPlan.Ready -> {
-                                submitPlanExecutor.submit(
-                                    trxForResubmission.toCreatedTransaction(),
-                                    submitPlan.submitPlan
-                                )
-                            }
-
-                            PendingSubmitPlanStore.StoredSubmitPlan.AwaitingPlan -> {
-                                TransactionSubmitResult.NotAttempted(transaction.rawId)
-                            }
-                        }
-
-                    when (response) {
-                        is TransactionSubmitResult.Success -> {
-                            Twig.info { "Trx resubmission success: ${response.txIdString()}" }
-                        }
-
-                        is TransactionSubmitResult.Failure -> {
-                            Twig.error { "Trx resubmission failure: ${response.description}" }
-                            throw LightWalletException.TransactionSubmitException(
-                                response.code,
-                                response.description,
-                            )
-                        }
-
-                        is TransactionSubmitResult.NotAttempted -> {
-                            Twig.warn { "Trx resubmission not attempted: ${response.txIdString()}" }
-                        }
-                    }
-                }
-            }
+            list.forEach { transaction -> resubmitTransaction(transaction) }
         } else {
             Twig.debug { "Trx resubmission: No trx for resubmission found" }
+        }
+    }
+
+    private suspend fun resubmitTransaction(transaction: DbTransactionOverview) {
+        val submitPlan = pendingSubmitPlanStore.getSubmitPlan(transaction.rawId)
+        if (submitPlan == PendingSubmitPlanStore.StoredSubmitPlan.AwaitingPlan) {
+            Twig.debug {
+                "Trx resubmission: Skipping ${transaction.txIdString()} until a submit plan is registered"
+            }
+            return
+        }
+
+        val trxForResubmission =
+            runCatching { repository.findEncodedTransactionByTxId(transaction.rawId) }
+                .getOrNull()
+                ?: run {
+                    Twig.warn {
+                        "Trx resubmission: Unable to read ${transaction.txIdString()} from the wallet " +
+                            "store; it will be retried next sync cycle"
+                    }
+                    return
+                }
+
+        Twig.debug { "Trx resubmission: Found: ${trxForResubmission.txIdString()}" }
+
+        retryUpToAndContinue(TRANSACTION_RESUBMIT_RETRIES) {
+            val response =
+                when (submitPlan) {
+                    null -> {
+                        txManager.submit(trxForResubmission)
+                    }
+
+                    is PendingSubmitPlanStore.StoredSubmitPlan.Ready -> {
+                        submitPlanExecutor.submit(
+                            trxForResubmission.toCreatedTransaction(),
+                            submitPlan.submitPlan
+                        )
+                    }
+
+                    PendingSubmitPlanStore.StoredSubmitPlan.AwaitingPlan -> {
+                        TransactionSubmitResult.NotAttempted(transaction.rawId)
+                    }
+                }
+
+            when (response) {
+                is TransactionSubmitResult.Success -> {
+                    Twig.info { "Trx resubmission success: ${response.txIdString()}" }
+                }
+
+                is TransactionSubmitResult.Failure -> {
+                    Twig.error { "Trx resubmission failure: ${response.description}" }
+                    throw LightWalletException.TransactionSubmitException(
+                        response.code,
+                        response.description,
+                    )
+                }
+
+                is TransactionSubmitResult.NotAttempted -> {
+                    Twig.warn { "Trx resubmission not attempted: ${response.txIdString()}" }
+                }
+            }
         }
     }
 
@@ -2752,8 +2927,41 @@ class CompactBlockProcessor internal constructor(
             loadTransactions = {
                 repository.findUnminedTransactionsWithinExpiry(blockHeight)
             },
-            transactionId = { it.rawId }
+            transactionId = { it.rawId },
+            retainMissing = { txId -> shouldRetainViewInvisiblePlan(txId, blockHeight) }
         )
+
+    /**
+     * Decides whether a submit plan should survive pruning for a transaction id that the derived history view
+     * did not return as a resubmission candidate. This does not synthesize the transaction as a candidate for
+     * resubmission here; it only protects the plan from being discarded before the transaction becomes
+     * view-visible, mirroring the case of a wallet-created transaction that hasn't been projected into the view
+     * yet (see [resubmitUnminedTransactions]).
+     */
+    private suspend fun shouldRetainViewInvisiblePlan(
+        txId: FirstClassByteArray,
+        blockHeight: BlockHeight
+    ): Boolean {
+        val txIdString = txId.byteArray.toHexReversed()
+        return runCatching { repository.findEncodedTransactionByTxId(txId) }
+            .onFailure {
+                Twig.warn { "Trx resubmission pruning: Wallet store read failed for $txIdString, keeping plan" }
+            }.fold(
+                onSuccess = { encodedTransaction -> encodedTransaction.shouldRetainPlan(txIdString, blockHeight) },
+                onFailure = { true }
+            )
+    }
+
+    private fun EncodedTransaction?.shouldRetainPlan(
+        txIdString: String,
+        blockHeight: BlockHeight
+    ): Boolean {
+        if (this == null) {
+            Twig.debug { "Trx resubmission pruning: $txIdString not found in wallet store, pruning plan" }
+        }
+        val expiryHeight = this?.expiryHeight
+        return this != null && (expiryHeight == null || expiryHeight.value == 0L || expiryHeight > blockHeight)
+    }
 
     suspend fun getUtxoCacheBalance(address: String): Zatoshi = backend.getDownloadedUtxoBalance(address)
 
@@ -2862,8 +3070,36 @@ class CompactBlockProcessor internal constructor(
     }
 }
 
+/**
+ * Outcome of fetching the subtree roots for a single pool within [CompactBlockProcessor.getSubtreeRoots].
+ * [Roots] covers both a genuinely successful fetch and one tolerated as an unknown-pool failure (see
+ * `isUnknownPoolFailure`), since both leave the pool with a (possibly empty) root list and no failure to
+ * propagate.
+ */
+private sealed interface PoolFetchOutcome {
+    data class Roots(
+        val list: List<SubtreeRoot>
+    ) : PoolFetchOutcome
+
+    data class Failed(
+        val failure: GetSubtreeRootsResult
+    ) : PoolFetchOutcome
+}
+
 private const val NOT_FOUND_MESSAGE_WORKAROUND = "Transaction not found"
 private const val NOT_FOUND_MESSAGE_WORKAROUND_2 =
     "No such mempool or blockchain transaction. Use gettransaction for wallet transactions."
 
 private const val NOT_FOUND_MESSAGE_WORKAROUND_3 = "No such mempool or main chain transaction"
+
+/** Length of the opaque correlation id prefix used in BlockEnhancer diagnostic logs. */
+private const val LOG_CORRELATION_ID_LENGTH = 6
+
+/** Short, non-PII label for diagnostic logging. */
+private val TransactionDataRequest.typeName: String
+    get() =
+        when (this) {
+            is TransactionDataRequest.GetStatus -> "getStatus"
+            is TransactionDataRequest.Enhancement -> "enhancement"
+            is TransactionDataRequest.TransactionsInvolvingAddress -> "transactionsInvolvingAddress"
+        }

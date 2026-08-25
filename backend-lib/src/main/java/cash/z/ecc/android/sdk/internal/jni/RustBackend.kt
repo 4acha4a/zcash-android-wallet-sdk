@@ -17,6 +17,7 @@ import cash.z.ecc.android.sdk.internal.model.JniWalletSummary
 import cash.z.ecc.android.sdk.internal.model.ProposalUnsafe
 import cash.z.ecc.android.sdk.internal.model.RustLogging
 import cash.z.ecc.android.sdk.internal.model.isNotLoggingInProduction
+import co.electriccoin.lightwallet.client.BuildConfig
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -568,7 +569,14 @@ class RustBackend private constructor(
     companion object {
         internal val rustLibraryLoader = NativeLibraryLoader("zcashwalletsdk")
 
-        private val rustLogging: RustLogging = RustLogging.Off
+        /**
+         * `Off` in production release builds (guarded below by [isNotLoggingInProduction]); `Debug`
+         * everywhere else. `initOnLoad` installs the process-global `tracing` subscriber, and
+         * `Debug`'s level filter includes `info!` and above, so no separate `Info` case is needed
+         * on [RustLogging].
+         */
+        private val rustLogging: RustLogging =
+            if (BuildConfig.BUILD_TYPE.contains("release")) RustLogging.Off else RustLogging.Debug
 
         suspend fun loadLibrary() {
             rustLibraryLoader.load {

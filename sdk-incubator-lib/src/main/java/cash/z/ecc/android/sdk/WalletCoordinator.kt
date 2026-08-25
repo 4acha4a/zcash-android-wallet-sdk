@@ -1,3 +1,5 @@
+@file:Suppress("DestructuringDeclarationWithTooManyEntries")
+
 package cash.z.ecc.android.sdk
 
 import android.content.Context
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
@@ -78,53 +81,54 @@ class WalletCoordinator(
         ) : InternalSynchronizerStatus()
     }
 
-    @Suppress("DestructuringDeclarationWithTooManyEntries")
     @OptIn(ExperimentalCoroutinesApi::class)
     private val synchronizerOrLockoutId: Flow<InternalSynchronizerStatus> =
         combine(
             persistableWallet,
             synchronizerLockoutId,
             isTorEnabled,
-            isExchangeRateEnabled
+            isExchangeRateEnabled,
         ) { persistableWallet, lockoutId, isTorEnabled, isExchangeRateEnabled ->
             SynchronizerLockoutInternalState(
                 persistableWallet = persistableWallet,
                 lockoutId = lockoutId,
                 isTorEnabled = isTorEnabled,
-                isExchangeRateEnabled = isExchangeRateEnabled
+                isExchangeRateEnabled = isExchangeRateEnabled,
             )
-        }.flatMapLatest { (persistableWallet, lockoutId, isTorEnabled, isExchangeRateEnabled) ->
-            if (null != lockoutId) { // this one needs to come first
-                flowOf(InternalSynchronizerStatus.Lockout(lockoutId))
-            } else if (null == persistableWallet) {
-                flowOf(InternalSynchronizerStatus.NoWallet)
-            } else {
-                callbackFlow<InternalSynchronizerStatus.Available> {
-                    val closeableSynchronizer =
-                        Synchronizer.new(
-                            context = context,
-                            zcashNetwork = persistableWallet.network,
-                            lightWalletEndpoint = persistableWallet.endpoint,
-                            birthday = persistableWallet.birthday,
-                            setup =
-                                AccountCreateSetup(
-                                    accountName = accountName,
-                                    keySource = keySource,
-                                    seed = FirstClassByteArray(persistableWallet.seedPhrase.toByteArray())
-                                ),
-                            walletInitMode = persistableWallet.walletInitMode,
-                            isTorEnabled = isTorEnabled == true,
-                            isExchangeRateEnabled = isExchangeRateEnabled == true
-                        )
+        }.distinctUntilChanged()
+            .flatMapLatest { (persistableWallet, lockoutId, isTorEnabled, isExchangeRateEnabled) ->
+                if (null != lockoutId) { // this one needs to come first
+                    flowOf(InternalSynchronizerStatus.Lockout(lockoutId))
+                } else if (null == persistableWallet) {
+                    flowOf(InternalSynchronizerStatus.NoWallet)
+                } else {
+                    callbackFlow<InternalSynchronizerStatus.Available> {
+                        val closeableSynchronizer =
+                            Synchronizer.new(
+                                context = context,
+                                zcashNetwork = persistableWallet.network,
+                                lightWalletEndpoint = persistableWallet.endpoint,
+                                birthday = persistableWallet.birthday,
+                                setup =
+                                    AccountCreateSetup(
+                                        accountName = accountName,
+                                        keySource = keySource,
+                                        seed = FirstClassByteArray(persistableWallet.seedPhrase.toByteArray())
+                                    ),
+                                walletInitMode = persistableWallet.walletInitMode,
+                                isTorEnabled = isTorEnabled == true,
+                                isExchangeRateEnabled = isExchangeRateEnabled == true
+                            )
 
-                    trySend(InternalSynchronizerStatus.Available(closeableSynchronizer))
-                    awaitClose {
-                        Twig.info { "Closing flow and stopping synchronizer" }
-                        closeableSynchronizer.close()
+                        trySend(InternalSynchronizerStatus.Available(closeableSynchronizer))
+
+                        awaitClose {
+                            Twig.info { "Closing flow and stopping synchronizer" }
+                            closeableSynchronizer.close()
+                        }
                     }
                 }
             }
-        }
 
     /**
      * Synchronizer for the Zcash SDK. Emits null until a wallet secret is persisted.
@@ -247,5 +251,5 @@ private data class SynchronizerLockoutInternalState(
     val persistableWallet: PersistableWallet?,
     val lockoutId: UUID?,
     val isTorEnabled: Boolean?,
-    val isExchangeRateEnabled: Boolean?
+    val isExchangeRateEnabled: Boolean?,
 )
