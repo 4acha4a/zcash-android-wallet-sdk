@@ -28,8 +28,9 @@ use uuid::Uuid;
 
 use pczt::{
     Pczt,
-    roles::{combiner::Combiner, prover::Prover},
+    roles::{combiner::Combiner, prover::Prover, updater::Updater},
 };
+use sapling::{ProofGenerationKey, keys::FullViewingKey as SaplingFullViewingKey};
 use transparent::{
     address::{Script, TransparentAddress},
     bundle::{OutPoint, TxOut},
@@ -2568,6 +2569,8 @@ pub extern "C" fn Java_cash_z_ecc_android_sdk_internal_jni_RustBackend_redactPcz
         // it — the compact view caused missing-signature failures at
         // extraction in zcash-swift-wallet-sdk#1863, which this mirrors.
         let pczt_with_proofs = redact_pczt_for_signer(&pczt, SignerView::Full);
+        // A proof generation key is needed by the Prover, never by the hardware Signer.
+        let pczt_with_proofs = redact_sapling_proof_generation_keys(pczt_with_proofs);
 
         Ok(utils::rust_bytes_to_java(
             env,
@@ -2578,6 +2581,195 @@ pub extern "C" fn Java_cash_z_ecc_android_sdk_internal_jni_RustBackend_redactPcz
         .into_raw())
     });
     unwrap_exc_or(&mut env, res, ptr::null_mut())
+}
+
+fn redact_sapling_proof_generation_keys(pczt: Pczt) -> Pczt {
+    pczt::roles::redactor::Redactor::new(pczt)
+        .redact_sapling_with(|mut redactor| {
+            redactor.redact_spends(|mut spend| spend.clear_proof_generation_key());
+        })
+        .finish()
+}
+
+#[derive(Debug)]
+enum AddSaplingProofGenerationKeysError {
+    InvalidKeyLength(&'static str),
+    InvalidScalarEncoding(&'static str),
+    InvalidAk,
+    NoMatchingKey(usize),
+    AmbiguousMatchingKeys(usize),
+    MalformedPczt,
+    PcztUpdateFailure,
+}
+
+impl std::fmt::Display for AddSaplingProofGenerationKeysError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidKeyLength(scope) => write!(f, "invalid key length ({scope})"),
+            Self::InvalidScalarEncoding(scope) => write!(f, "invalid scalar encoding ({scope})"),
+            Self::InvalidAk => write!(f, "invalid ak: UFVK has no valid Sapling component"),
+            Self::NoMatchingKey(index) => write!(f, "no matching key for Sapling spend {index}"),
+            Self::AmbiguousMatchingKeys(index) => {
+                write!(f, "ambiguous matching keys for Sapling spend {index}")
+            }
+            Self::MalformedPczt => write!(f, "malformed PCZT"),
+            Self::PcztUpdateFailure => write!(f, "PCZT update failure"),
+        }
+    }
+}
+
+impl Error for AddSaplingProofGenerationKeysError {}
+
+fn parse_sapling_nsk(
+    bytes: &[u8],
+    scope: &'static str,
+) -> Result<jubjub::Fr, AddSaplingProofGenerationKeysError> {
+    let encoding: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| AddSaplingProofGenerationKeysError::InvalidKeyLength(scope))?;
+    Option::from(jubjub::Fr::from_bytes(&encoding)).ok_or(
+        AddSaplingProofGenerationKeysError::InvalidScalarEncoding(scope),
+    )
+}
+
+fn sapling_candidate_matches(spend: &sapling::pczt::Spend, candidate: &ProofGenerationKey) -> bool {
+    let expected_fvk = SaplingFullViewingKey {
+        vk: candidate.to_viewing_key(),
+        // The OVK is not involved in spend nullifier or randomized-key verification.
+        ovk: sapling::keys::OutgoingViewingKey([0; 32]),
+    };
+    spend.verify_nullifier(Some(&expected_fvk)).is_ok()
+        && spend.verify_rk(Some(&expected_fvk)).is_ok()
+}
+
+fn add_sapling_proof_generation_keys(
+    pczt: Pczt,
+    ufvk: &UnifiedFullViewingKey,
+    external_nsk: jubjub::Fr,
+    internal_nsk: jubjub::Fr,
+) -> Result<Pczt, AddSaplingProofGenerationKeysError> {
+    if pczt.sapling().spends().is_empty() {
+        return Ok(pczt);
+    }
+
+    let ak = ufvk
+        .sapling()
+        .map(|dfvk| dfvk.fvk().vk.ak.clone())
+        .ok_or(AddSaplingProofGenerationKeysError::InvalidAk)?;
+    let external = ProofGenerationKey {
+        ak: ak.clone(),
+        nsk: external_nsk,
+    };
+    let internal = ProofGenerationKey {
+        ak,
+        nsk: internal_nsk,
+    };
+    let mut semantic_error = None;
+
+    let updated = Updater::new(pczt).update_sapling_with(|mut updater| {
+        let spend_count = updater.bundle().spends().len();
+        for index in 0..spend_count {
+            let spend = &updater.bundle().spends()[index];
+
+            // Dummy spends already carry a constructor-generated key. Never replace it
+            // with account key material, including in a malformed/incomplete PCZT.
+            if spend.value().is_some_and(|value| value.inner() == 0) {
+                continue;
+            }
+
+            if let Some(existing) = spend.proof_generation_key() {
+                if sapling_candidate_matches(spend, existing) {
+                    continue;
+                }
+                semantic_error = Some(AddSaplingProofGenerationKeysError::NoMatchingKey(index));
+                return Err(sapling::pczt::UpdaterError::WrongProofGenerationKey);
+            }
+
+            let external_matches = sapling_candidate_matches(spend, &external);
+            let internal_matches = sapling_candidate_matches(spend, &internal);
+            let selected = match (external_matches, internal_matches) {
+                (true, false) => external.clone(),
+                (false, true) => internal.clone(),
+                (true, true) if external.nsk == internal.nsk => external.clone(),
+                (true, true) => {
+                    semantic_error = Some(
+                        AddSaplingProofGenerationKeysError::AmbiguousMatchingKeys(index),
+                    );
+                    return Err(sapling::pczt::UpdaterError::WrongProofGenerationKey);
+                }
+                (false, false) => {
+                    semantic_error = Some(AddSaplingProofGenerationKeysError::NoMatchingKey(index));
+                    return Err(sapling::pczt::UpdaterError::WrongProofGenerationKey);
+                }
+            };
+            updater
+                .update_spend_with(index, |mut spend| spend.set_proof_generation_key(selected))?;
+        }
+        Ok(())
+    });
+
+    match updated {
+        Ok(updater) => Ok(updater.finish()),
+        Err(_) => {
+            Err(semantic_error.unwrap_or(AddSaplingProofGenerationKeysError::PcztUpdateFailure))
+        }
+    }
+}
+
+/// Adds the hardware wallet's Sapling proof generation keys to matching non-dummy spends.
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_cash_z_ecc_android_sdk_internal_jni_RustBackend_addSaplingProofGenerationKeys<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _: JClass<'local>,
+    pczt: JByteArray<'local>,
+    ufvk: JString<'local>,
+    external_nsk: JByteArray<'local>,
+    internal_nsk: JByteArray<'local>,
+    network_id: jint,
+) -> jbyteArray {
+    let res = catch_unwind(&mut env, |env| {
+        let _span = tracing::info_span!("RustBackend.addSaplingProofGenerationKeys").entered();
+        let network = parse_network(network_id as u32)?;
+        let pczt =
+            parse_pczt(env, pczt).map_err(|_| AddSaplingProofGenerationKeysError::MalformedPczt)?;
+        let ufvk = parse_ufvk(env, ufvk, &network)
+            .map_err(|_| AddSaplingProofGenerationKeysError::InvalidAk)?;
+        let external_bytes = SecretVec::new(utils::java_bytes_to_rust(env, &external_nsk)?);
+        let internal_bytes = SecretVec::new(utils::java_bytes_to_rust(env, &internal_nsk)?);
+        let external_nsk = parse_sapling_nsk(external_bytes.expose_secret(), "external")?;
+        let internal_nsk = parse_sapling_nsk(internal_bytes.expose_secret(), "internal")?;
+
+        let updated = add_sapling_proof_generation_keys(pczt, &ufvk, external_nsk, internal_nsk)?;
+        Ok(utils::rust_bytes_to_java(
+            env,
+            &updated
+                .serialize()
+                .map_err(|_| AddSaplingProofGenerationKeysError::PcztUpdateFailure)?,
+        )?
+        .into_raw())
+    });
+    unwrap_exc_or(&mut env, res, ptr::null_mut())
+}
+
+/// Returns 0 for a canonical Sapling nsk, 1 for an invalid length, and 2 for an invalid scalar.
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_cash_z_ecc_android_sdk_internal_jni_RustBackend_validateSaplingNsk(
+    mut env: JNIEnv,
+    _: JClass,
+    nsk: JByteArray,
+) -> jint {
+    let res = catch_unwind(&mut env, |env| {
+        let bytes = utils::java_bytes_to_rust(env, &nsk)?;
+        Ok(match parse_sapling_nsk(&bytes, "key") {
+            Ok(_) => 0,
+            Err(AddSaplingProofGenerationKeysError::InvalidKeyLength(_)) => 1,
+            Err(AddSaplingProofGenerationKeysError::InvalidScalarEncoding(_)) => 2,
+            Err(_) => unreachable!(),
+        })
+    });
+    unwrap_exc_or(&mut env, res, 2)
 }
 
 /// Returns `true` if this PCZT requires Sapling proofs (and thus the caller needs to have
@@ -3919,7 +4111,7 @@ fn parse_ufvk(
 ) -> anyhow::Result<UnifiedFullViewingKey> {
     let ufvk_string = utils::java_string_to_rust(env, &ufvk_string)?;
     UnifiedFullViewingKey::decode(network, &ufvk_string)
-        .map_err(|e| anyhow!("Value \"{ufvk_string}\" did not decode as a valid UFVK: {e}"))
+        .map_err(|e| anyhow!("UFVK did not decode as valid: {e}"))
 }
 
 struct UnifiedAddressParser((NetworkType, UnifiedAddress));
@@ -4027,6 +4219,223 @@ pub extern "C" fn Java_cash_z_ecc_android_sdk_internal_jni_RustBackend_proposeOr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use incrementalmerkletree::Retention;
+    use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer};
+    use shardtree::{ShardTree, store::memory::MemoryShardStore};
+    use zcash_note_encryption::try_note_decryption;
+    use zcash_primitives::transaction::{
+        builder::{BuildConfig, Builder, PcztResult},
+        fees::zip317,
+    };
+
+    fn sapling_spend_pczt(
+        scope: zip32::Scope,
+    ) -> (Pczt, UnifiedFullViewingKey, jubjub::Fr, jubjub::Fr, usize) {
+        let mut rng = OsRng;
+        let usk =
+            UnifiedSpendingKey::from_seed(&TestNetwork, &[11; 32], zip32::AccountId::ZERO).unwrap();
+        let external_extsk = usk.sapling().clone();
+        let external_dfvk = external_extsk.to_diversifiable_full_viewing_key();
+        let internal_extsk = external_extsk.derive_internal();
+        let internal_dfvk = internal_extsk.to_diversifiable_full_viewing_key();
+        let spend_dfvk = match scope {
+            zip32::Scope::External => &external_dfvk,
+            zip32::Scope::Internal => &internal_dfvk,
+        };
+        let recipient = spend_dfvk.default_address().1;
+
+        let value = sapling::value::NoteValue::from_raw(1_000_000);
+        let note = {
+            let mut builder = sapling::builder::Builder::new(
+                sapling::note_encryption::Zip212Enforcement::On,
+                sapling::builder::BundleType::DEFAULT,
+                sapling::Anchor::empty_tree(),
+            );
+            builder
+                .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
+                .unwrap();
+            let (bundle, meta) = builder
+                .build::<LocalTxProver, LocalTxProver, _, i64>(&[], &mut rng)
+                .unwrap()
+                .unwrap();
+            let output = &bundle.shielded_outputs()[meta.output_index(0).unwrap()];
+            let domain = sapling::note_encryption::SaplingDomain::new(
+                sapling::note_encryption::Zip212Enforcement::On,
+            );
+            try_note_decryption(&domain, &spend_dfvk.to_external_ivk().prepare(), output)
+                .unwrap()
+                .0
+        };
+
+        let (anchor, merkle_path) = {
+            let leaf = sapling::Node::from_cmu(&note.cmu());
+            let mut tree =
+                ShardTree::<_, 32, 16>::new(MemoryShardStore::<sapling::Node, u32>::empty(), 100);
+            tree.append(leaf, Retention::Marked).unwrap();
+            tree.checkpoint(1).unwrap();
+            let path = tree
+                .witness_at_checkpoint_depth(0.into(), 0)
+                .unwrap()
+                .unwrap();
+            (sapling::Anchor::from(path.root(leaf)), path)
+        };
+
+        let mut builder = Builder::new(
+            TestNetwork,
+            BlockHeight::from_u32(3_000_000),
+            BuildConfig::Standard {
+                sapling_anchor: Some(anchor),
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                ironwood_anchor: None,
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder
+            .add_sapling_spend::<zip317::FeeRule>(spend_dfvk.fvk().clone(), note, merkle_path)
+            .unwrap();
+        builder
+            .add_sapling_output::<zip317::FeeRule>(
+                Some(external_dfvk.to_ovk(zip32::Scope::Internal)),
+                internal_dfvk.default_address().1,
+                Zatoshis::const_from_u64(990_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        let PcztResult {
+            pczt_parts,
+            sapling_meta,
+            ..
+        } = builder
+            .build_for_pczt(OsRng, &zip317::FeeRule::standard())
+            .unwrap();
+        let pczt = IoFinalizer::new(Creator::build_from_parts(pczt_parts).unwrap())
+            .finalize_io()
+            .unwrap();
+        let spend_index = sapling_meta.spend_index(0).unwrap();
+
+        (
+            pczt,
+            usk.to_unified_full_viewing_key(),
+            external_extsk.expsk.nsk,
+            internal_extsk.expsk.nsk,
+            spend_index,
+        )
+    }
+
+    #[test]
+    fn sapling_nsk_rejects_invalid_lengths_and_noncanonical_scalars() {
+        assert!(matches!(
+            parse_sapling_nsk(&[0; 31], "external"),
+            Err(AddSaplingProofGenerationKeysError::InvalidKeyLength(
+                "external"
+            ))
+        ));
+        assert!(matches!(
+            parse_sapling_nsk(&[0xff; 32], "internal"),
+            Err(AddSaplingProofGenerationKeysError::InvalidScalarEncoding(
+                "internal"
+            ))
+        ));
+        assert!(parse_sapling_nsk(&[0; 32], "external").is_ok());
+    }
+
+    #[test]
+    fn adding_sapling_keys_to_pczt_without_spends_is_exact_noop() {
+        let pczt = pczt::roles::creator::Creator::new(
+            u32::from(BranchId::Nu6_3),
+            0,
+            TestNetwork.coin_type(),
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let original = pczt.clone().serialize().unwrap();
+        let ufvk = UnifiedSpendingKey::from_seed(&TestNetwork, &[7; 32], zip32::AccountId::ZERO)
+            .unwrap()
+            .to_unified_full_viewing_key();
+
+        let updated = add_sapling_proof_generation_keys(
+            pczt,
+            &ufvk,
+            jubjub::Fr::from(1),
+            jubjub::Fr::from(2),
+        )
+        .unwrap();
+
+        assert_eq!(original, updated.serialize().unwrap());
+    }
+
+    #[test]
+    fn adds_external_and_internal_keys_by_cryptographic_match() {
+        for scope in [zip32::Scope::External, zip32::Scope::Internal] {
+            let (pczt, ufvk, external_nsk, internal_nsk, spend_index) = sapling_spend_pczt(scope);
+            // Reverse the two arguments to prove selection is by spend verification,
+            // rather than by the parameter's external/internal position.
+            let updated =
+                add_sapling_proof_generation_keys(pczt, &ufvk, internal_nsk, external_nsk).unwrap();
+            Updater::new(updated)
+                .update_sapling_with(|updater| {
+                    let spend = &updater.bundle().spends()[spend_index];
+                    assert!(spend.proof_generation_key().is_some());
+                    assert!(spend.verify_nullifier(None).is_ok());
+                    assert!(spend.verify_rk(None).is_ok());
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn adding_keys_is_idempotent_and_rejects_nonmatching_keys() {
+        let (pczt, ufvk, external_nsk, internal_nsk, _) =
+            sapling_spend_pczt(zip32::Scope::External);
+        let updated =
+            add_sapling_proof_generation_keys(pczt.clone(), &ufvk, external_nsk, internal_nsk)
+                .unwrap();
+        let expected = updated.clone().serialize().unwrap();
+        let updated_again =
+            add_sapling_proof_generation_keys(updated, &ufvk, external_nsk, internal_nsk).unwrap();
+        assert_eq!(expected, updated_again.serialize().unwrap());
+
+        assert!(matches!(
+            add_sapling_proof_generation_keys(
+                pczt,
+                &ufvk,
+                jubjub::Fr::from(101),
+                jubjub::Fr::from(102),
+            ),
+            Err(AddSaplingProofGenerationKeysError::NoMatchingKey(_))
+        ));
+    }
+
+    #[test]
+    fn signer_redaction_removes_sapling_proof_generation_keys() {
+        let (pczt, ufvk, external_nsk, internal_nsk, spend_index) =
+            sapling_spend_pczt(zip32::Scope::External);
+        let updated =
+            add_sapling_proof_generation_keys(pczt, &ufvk, external_nsk, internal_nsk).unwrap();
+        let prover = LocalTxProver::bundled();
+        let proven = Prover::new(updated)
+            .create_sapling_proofs(&prover, &prover)
+            .unwrap()
+            .finish();
+        assert!(!Prover::new(proven.clone()).requires_sapling_proofs());
+        let redacted = redact_sapling_proof_generation_keys(proven);
+
+        Updater::new(redacted)
+            .update_sapling_with(|updater| {
+                assert!(
+                    updater.bundle().spends()[spend_index]
+                        .proof_generation_key()
+                        .is_none()
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 
     #[test]
     fn map_import_account_error_tags_checkpoint_parity_failures() {

@@ -7260,6 +7260,7 @@ dependencies = [
  "http-body-util",
  "incrementalmerkletree",
  "jni",
+ "jubjub",
  "libc",
  "log-panics",
  "nonempty",

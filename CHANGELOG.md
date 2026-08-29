@@ -6,6 +6,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Synchronizer.addSaplingProofGenerationKeys`, which enables a UFVK-only hardware-wallet
+  account to add its external or internal Sapling proof generation key to each matching PCZT
+  spend before calling `addProofsToPczt`. The method takes a `UnifiedFullViewingKey` and two
+  validated, redacted `SaplingNsk` values; it never requires or exposes `ask`, a seed, or a
+  unified spending key. `redactPcztForSigner` removes these keys from the signer payload.
+- `SaplingNsk`, a Rust-validated semantic wrapper for a canonical 32-byte Sapling nullifier
+  private-key scalar. Construct it with `SaplingNsk.new`; invalid lengths and non-canonical
+  scalar encodings are rejected before the value reaches a transaction operation.
+
+### Changed
+- `Synchronizer` gains `addSaplingProofGenerationKeys` as an abstract member, so any custom
+  implementer or test fake must now provide it.
+
+### Fixed
+- Invalid UFVK errors no longer include the supplied UFVK encoding, preventing viewing-key
+  material from being copied out through exception text. No caller changes are required.
+
 ## [3.0.0] - 2026-08-25
 
 ### Added

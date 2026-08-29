@@ -41,6 +41,7 @@ zcash_pool_migration = { version = "0.1.0", features = ["wallet"] }
 # (`pczt::roles::signer::batch`).
 pczt = { version = "0.9.0", features = ["prover", "orchard", "sapling", "signer"] }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false }
+jubjub = "0.10"
 transparent = { package = "zcash_transparent", version = "0.10", default-features = false }
 zcash_address = "0.13"
 zcash_client_backend = { version = "0.24.0", features = [

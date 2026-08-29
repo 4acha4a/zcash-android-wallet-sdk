@@ -9,7 +9,9 @@ import cash.z.ecc.android.sdk.model.CreatedTransaction
 import cash.z.ecc.android.sdk.model.FirstClassByteArray
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.TransactionSubmitResult
+import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
 import cash.z.ecc.android.sdk.model.UnifiedSpendingKey
 import cash.z.ecc.android.sdk.model.Zatoshi
 import co.electriccoin.lightwallet.client.model.LightWalletEndpoint
@@ -473,6 +475,13 @@ class SdkBroadcasterTest {
         ): Pczt = error("Unused")
 
         override suspend fun redactPcztForSigner(pczt: Pczt): Pczt = error("Unused")
+
+        override suspend fun addSaplingProofGenerationKeys(
+            pczt: Pczt,
+            ufvk: UnifiedFullViewingKey,
+            externalNsk: SaplingNsk,
+            internalNsk: SaplingNsk
+        ): Pczt = error("Unused")
 
         override suspend fun pcztRequiresSaplingProofs(pczt: Pczt): Boolean = error("Unused")
 

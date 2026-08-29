@@ -5,7 +5,9 @@ import cash.z.ecc.android.sdk.model.Account
 import cash.z.ecc.android.sdk.model.AccountUuid
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.TransactionSubmitResult
+import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
 import cash.z.ecc.android.sdk.model.UnifiedSpendingKey
 import cash.z.ecc.android.sdk.model.Zatoshi
 
@@ -110,6 +112,13 @@ internal interface OutboundTransactionManager {
     ): Pczt
 
     suspend fun redactPcztForSigner(pczt: Pczt): Pczt
+
+    suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ): Pczt
 
     suspend fun pcztRequiresSaplingProofs(pczt: Pczt): Boolean
 

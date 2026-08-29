@@ -499,6 +499,20 @@ class RustBackend private constructor(
 
     override suspend fun redactPcztForSigner(pczt: ByteArray): ByteArray = redactPcztForSignerRole(pczt = pczt)
 
+    override suspend fun addSaplingProofGenerationKeys(
+        pczt: ByteArray,
+        ufvk: String,
+        externalNsk: ByteArray,
+        internalNsk: ByteArray
+    ): ByteArray =
+        addSaplingProofGenerationKeys(
+            pczt = pczt,
+            ufvk = ufvk,
+            externalNsk = externalNsk,
+            internalNsk = internalNsk,
+            networkId = networkId
+        )
+
     override suspend fun pcztRequiresSaplingProofs(pczt: ByteArray): Boolean = requiresSaplingProofs(pczt = pczt)
 
     override suspend fun addProofsToPczt(pczt: ByteArray): ByteArray =
@@ -717,6 +731,11 @@ class RustBackend private constructor(
         ): Array<String>
 
         fun validateUnifiedSpendingKey(bytes: ByteArray) = isValidSpendingKey(bytes)
+
+        fun validateSaplingNskBytes(bytes: ByteArray) = validateSaplingNsk(bytes)
+
+        @JvmStatic
+        private external fun validateSaplingNsk(bytes: ByteArray): Int
 
         @JvmStatic
         private external fun isValidSpendingKey(bytes: ByteArray): Boolean
@@ -949,6 +968,15 @@ class RustBackend private constructor(
 
         @JvmStatic
         private external fun redactPcztForSignerRole(pczt: ByteArray): ByteArray
+
+        @JvmStatic
+        private external fun addSaplingProofGenerationKeys(
+            pczt: ByteArray,
+            ufvk: String,
+            externalNsk: ByteArray,
+            internalNsk: ByteArray,
+            networkId: Int
+        ): ByteArray
 
         @JvmStatic
         private external fun requiresSaplingProofs(pczt: ByteArray): Boolean

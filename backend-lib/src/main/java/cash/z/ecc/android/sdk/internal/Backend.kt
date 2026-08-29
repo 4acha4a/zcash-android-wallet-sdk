@@ -93,6 +93,15 @@ interface Backend {
     @Throws(RuntimeException::class)
     suspend fun redactPcztForSigner(pczt: ByteArray): ByteArray
 
+    /** Adds matching Sapling proof generation keys to non-dummy spends. */
+    @Throws(RuntimeException::class)
+    suspend fun addSaplingProofGenerationKeys(
+        pczt: ByteArray,
+        ufvk: String,
+        externalNsk: ByteArray,
+        internalNsk: ByteArray
+    ): ByteArray
+
     /**
      * Checks whether the caller needs to have downloaded the Sapling parameters.
      *

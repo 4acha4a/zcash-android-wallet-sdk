@@ -22,6 +22,7 @@ import cash.z.ecc.android.sdk.model.BlockHeight
 import cash.z.ecc.android.sdk.model.FirstClassByteArray
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.SingleUseTransparentAddress
 import cash.z.ecc.android.sdk.model.UnifiedAddressRequest
 import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
@@ -169,6 +170,29 @@ internal class TypesafeBackendImpl(
         )
 
     override suspend fun redactPcztForSigner(pczt: Pczt): Pczt = Pczt(backend.redactPcztForSigner(pczt.toByteArray()))
+
+    override suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ): Pczt {
+        val externalBytes = externalNsk.copyBytes()
+        val internalBytes = internalNsk.copyBytes()
+        return try {
+            Pczt(
+                backend.addSaplingProofGenerationKeys(
+                    pczt = pczt.toByteArray(),
+                    ufvk = ufvk.encoding,
+                    externalNsk = externalBytes,
+                    internalNsk = internalBytes
+                )
+            )
+        } finally {
+            externalBytes.fill(0)
+            internalBytes.fill(0)
+        }
+    }
 
     override suspend fun pcztRequiresSaplingProofs(pczt: Pczt): Boolean =
         backend.pcztRequiresSaplingProofs(pczt.toByteArray())

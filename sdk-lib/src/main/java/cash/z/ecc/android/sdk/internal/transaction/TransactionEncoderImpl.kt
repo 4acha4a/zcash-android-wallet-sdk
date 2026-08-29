@@ -13,6 +13,8 @@ import cash.z.ecc.android.sdk.model.AccountUuid
 import cash.z.ecc.android.sdk.model.BlockHeight
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
+import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
 import cash.z.ecc.android.sdk.model.UnifiedSpendingKey
 import cash.z.ecc.android.sdk.model.Zatoshi
 
@@ -189,6 +191,25 @@ internal class TransactionEncoderImpl(
             throw PcztException.RedactPcztForSignerException(it.message, it.cause)
         }
 
+    override suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ): Pczt =
+        runCatching {
+            backend.addSaplingProofGenerationKeys(pczt, ufvk, externalNsk, internalNsk)
+        }.onFailure {
+            // JNI errors are deliberately not logged because backend messages can cross
+            // a secret-bearing boundary.
+            Twig.error { "Failed to add Sapling proof generation keys to PCZT." }
+        }.getOrElse { cause ->
+            throw PcztException.AddSaplingProofGenerationKeysException(
+                failure = addSaplingKeysFailure(cause.message),
+                cause = cause
+            )
+        }
+
     override suspend fun pcztRequiresSaplingProofs(pczt: Pczt): Boolean =
         runCatching {
             backend.pcztRequiresSaplingProofs(pczt = pczt)
@@ -293,3 +314,20 @@ internal class TransactionEncoderImpl(
         return backend.getBranchIdForHeight(height)
     }
 }
+
+private fun addSaplingKeysFailure(message: String?): PcztException.AddSaplingProofGenerationKeysFailure =
+    when {
+        message?.contains("invalid key length") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.INVALID_KEY_LENGTH
+        message?.contains("invalid scalar encoding") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.INVALID_SCALAR_ENCODING
+        message?.contains("invalid ak") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.INVALID_AK
+        message?.contains("no matching key") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.NO_MATCHING_KEY
+        message?.contains("ambiguous matching keys") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.AMBIGUOUS_MATCHING_KEYS
+        message?.contains("malformed PCZT") == true ->
+            PcztException.AddSaplingProofGenerationKeysFailure.MALFORMED_PCZT
+        else -> PcztException.AddSaplingProofGenerationKeysFailure.PCZT_UPDATE_FAILURE
+    }

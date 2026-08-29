@@ -23,6 +23,7 @@ import cash.z.ecc.android.sdk.model.BlockHeight
 import cash.z.ecc.android.sdk.model.FirstClassByteArray
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.SingleUseTransparentAddress
 import cash.z.ecc.android.sdk.model.UnifiedAddressRequest
 import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
@@ -107,6 +108,13 @@ internal interface TypesafeBackend {
      * @throws RuntimeException as a common indicator of the operation failure
      */
     suspend fun redactPcztForSigner(pczt: Pczt): Pczt
+
+    suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ): Pczt
 
     /**
      * Checks whether the caller needs to have downloaded the Sapling parameters.

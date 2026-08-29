@@ -39,6 +39,7 @@ import cash.z.ecc.android.sdk.model.ObserveFiatCurrencyResult
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.PercentDecimal
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.SdkFlags
 import cash.z.ecc.android.sdk.model.SingleUseTransparentAddress
 import cash.z.ecc.android.sdk.model.TransactionId
@@ -47,6 +48,7 @@ import cash.z.ecc.android.sdk.model.TransactionOverview
 import cash.z.ecc.android.sdk.model.TransactionRecipient
 import cash.z.ecc.android.sdk.model.TransactionSubmitResult
 import cash.z.ecc.android.sdk.model.UnifiedAddressRequest
+import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
 import cash.z.ecc.android.sdk.model.UnifiedSpendingKey
 import cash.z.ecc.android.sdk.model.Zatoshi
 import cash.z.ecc.android.sdk.model.ZcashNetwork
@@ -441,6 +443,20 @@ interface Synchronizer {
      */
     @Throws(PcztException.RedactPcztForSignerException::class)
     suspend fun redactPcztForSigner(pczt: Pczt): Pczt
+
+    /**
+     * Adds the Sapling proof generation key matching each non-dummy spend in [pczt].
+     *
+     * [ufvk] supplies the validated Sapling `ak`; both scope-specific nullifier private
+     * keys are checked cryptographically for every spend before either is inserted.
+     */
+    @Throws(PcztException.AddSaplingProofGenerationKeysException::class)
+    suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ): Pczt
 
     /**
      * Checks whether the caller needs to have downloaded the Sapling parameters.

@@ -66,6 +66,7 @@ import cash.z.ecc.android.sdk.model.ObserveFiatCurrencyResult
 import cash.z.ecc.android.sdk.model.Pczt
 import cash.z.ecc.android.sdk.model.PercentDecimal
 import cash.z.ecc.android.sdk.model.Proposal
+import cash.z.ecc.android.sdk.model.SaplingNsk
 import cash.z.ecc.android.sdk.model.SdkFlags
 import cash.z.ecc.android.sdk.model.SingleUseTransparentAddress
 import cash.z.ecc.android.sdk.model.TransactionId
@@ -75,6 +76,7 @@ import cash.z.ecc.android.sdk.model.TransactionPool
 import cash.z.ecc.android.sdk.model.TransactionRecipient
 import cash.z.ecc.android.sdk.model.TransactionSubmitResult
 import cash.z.ecc.android.sdk.model.UnifiedAddressRequest
+import cash.z.ecc.android.sdk.model.UnifiedFullViewingKey
 import cash.z.ecc.android.sdk.model.UnifiedSpendingKey
 import cash.z.ecc.android.sdk.model.Zatoshi
 import cash.z.ecc.android.sdk.model.ZcashNetwork
@@ -1152,6 +1154,13 @@ class SdkSynchronizer private constructor(
     ) = txManager.createPcztFromProposal(accountUuid, proposal)
 
     override suspend fun redactPcztForSigner(pczt: Pczt) = txManager.redactPcztForSigner(pczt)
+
+    override suspend fun addSaplingProofGenerationKeys(
+        pczt: Pczt,
+        ufvk: UnifiedFullViewingKey,
+        externalNsk: SaplingNsk,
+        internalNsk: SaplingNsk
+    ) = txManager.addSaplingProofGenerationKeys(pczt, ufvk, externalNsk, internalNsk)
 
     override suspend fun pcztRequiresSaplingProofs(pczt: Pczt) = txManager.pcztRequiresSaplingProofs(pczt)
 

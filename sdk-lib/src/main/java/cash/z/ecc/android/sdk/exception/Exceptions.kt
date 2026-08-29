@@ -481,6 +481,21 @@ sealed class PcztException(
     message: String,
     cause: Throwable? = null
 ) : SdkException(message, cause) {
+    enum class AddSaplingProofGenerationKeysFailure {
+        INVALID_KEY_LENGTH,
+        INVALID_SCALAR_ENCODING,
+        INVALID_AK,
+        NO_MATCHING_KEY,
+        AMBIGUOUS_MATCHING_KEYS,
+        MALFORMED_PCZT,
+        PCZT_UPDATE_FAILURE,
+    }
+
+    class AddSaplingProofGenerationKeysException internal constructor(
+        val failure: AddSaplingProofGenerationKeysFailure,
+        cause: Throwable?
+    ) : PcztException("Failed to add Sapling proof generation keys: $failure", cause)
+
     class CreatePcztFromProposalException internal constructor(
         description: String?,
         cause: Throwable?
