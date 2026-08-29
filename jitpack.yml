@@ -3,10 +3,15 @@ jdk:
 
 before_install:
   - |
-    SDK_MANAGER="$(find "${ANDROID_HOME}" -type f -name sdkmanager -print -quit)"
-    if [ -z "${SDK_MANAGER}" ]; then
-      echo "sdkmanager was not found under ANDROID_HOME=${ANDROID_HOME}" >&2
-      exit 1
-    fi
-    yes | "${SDK_MANAGER}" --licenses >/dev/null || true
-    "${SDK_MANAGER}" --install "ndk;27.0.12077973"
+    COMMAND_LINE_TOOLS_VERSION="15859902"
+    COMMAND_LINE_TOOLS_ZIP="/tmp/commandlinetools-linux-${COMMAND_LINE_TOOLS_VERSION}_latest.zip"
+    COMMAND_LINE_TOOLS_DIR="/tmp/android-command-line-tools"
+    curl --fail --location --silent --show-error \
+      "https://dl.google.com/android/repository/commandlinetools-linux-${COMMAND_LINE_TOOLS_VERSION}_latest.zip" \
+      --output "${COMMAND_LINE_TOOLS_ZIP}"
+    echo "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583  ${COMMAND_LINE_TOOLS_ZIP}" \
+      | sha256sum --check --status
+    unzip -q "${COMMAND_LINE_TOOLS_ZIP}" -d "${COMMAND_LINE_TOOLS_DIR}"
+    SDK_MANAGER="${COMMAND_LINE_TOOLS_DIR}/cmdline-tools/bin/sdkmanager"
+    yes | "${SDK_MANAGER}" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null || true
+    "${SDK_MANAGER}" --sdk_root="${ANDROID_HOME}" --install "ndk;27.0.12077973"
