@@ -15,3 +15,12 @@ before_install:
     SDK_MANAGER="${COMMAND_LINE_TOOLS_DIR}/cmdline-tools/bin/sdkmanager"
     yes | "${SDK_MANAGER}" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null || true
     "${SDK_MANAGER}" --sdk_root="${ANDROID_HOME}" --install "ndk;27.0.12077973"
+    curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain none
+    RUST_CHANNEL="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+    "${HOME}/.cargo/bin/rustup" toolchain install "${RUST_CHANNEL}" --profile minimal
+    "${HOME}/.cargo/bin/rustup" target add --toolchain "${RUST_CHANNEL}" \
+      armv7-linux-androideabi \
+      aarch64-linux-android \
+      i686-linux-android \
+      x86_64-linux-android
