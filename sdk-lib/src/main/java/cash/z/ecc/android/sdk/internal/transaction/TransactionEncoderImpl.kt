@@ -317,17 +317,31 @@ internal class TransactionEncoderImpl(
 
 private fun addSaplingKeysFailure(message: String?): PcztException.AddSaplingProofGenerationKeysFailure =
     when {
-        message?.contains("invalid key length") == true ->
+        message?.contains("invalid key length") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.INVALID_KEY_LENGTH
-        message?.contains("invalid scalar encoding") == true ->
+        }
+
+        message?.contains("invalid scalar encoding") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.INVALID_SCALAR_ENCODING
-        message?.contains("invalid ak") == true ->
+        }
+
+        message?.contains("invalid ak") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.INVALID_AK
-        message?.contains("no matching key") == true ->
+        }
+
+        message?.contains("no matching key") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.NO_MATCHING_KEY
-        message?.contains("ambiguous matching keys") == true ->
+        }
+
+        message?.contains("ambiguous matching keys") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.AMBIGUOUS_MATCHING_KEYS
-        message?.contains("malformed PCZT") == true ->
+        }
+
+        message?.contains("malformed PCZT") == true -> {
             PcztException.AddSaplingProofGenerationKeysFailure.MALFORMED_PCZT
-        else -> PcztException.AddSaplingProofGenerationKeysFailure.PCZT_UPDATE_FAILURE
+        }
+
+        else -> {
+            PcztException.AddSaplingProofGenerationKeysFailure.PCZT_UPDATE_FAILURE
+        }
     }

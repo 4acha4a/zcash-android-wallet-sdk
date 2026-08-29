@@ -126,6 +126,7 @@ cargo {
         "x86_64" to minSdkVersion,
     )
     profile = "release"
+    pythonCommand = "python3"
     extraCargoBuildArguments = run {
         // Test-only fixture exports; never part of a production native build.
         val features =
