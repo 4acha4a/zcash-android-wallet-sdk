@@ -1,0 +1,12 @@
+jdk:
+  - openjdk17
+
+before_install:
+  - |
+    SDK_MANAGER="$(find "${ANDROID_HOME}" -type f -name sdkmanager -print -quit)"
+    if [ -z "${SDK_MANAGER}" ]; then
+      echo "sdkmanager was not found under ANDROID_HOME=${ANDROID_HOME}" >&2
+      exit 1
+    fi
+    yes | "${SDK_MANAGER}" --licenses >/dev/null || true
+    "${SDK_MANAGER}" --install "ndk;27.0.12077973"
