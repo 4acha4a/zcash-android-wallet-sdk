@@ -9,7 +9,7 @@ val publicationVariant = "release"
 val isSnapshot = project.property("IS_SNAPSHOT").toString().toBoolean()
 val myVersion = project.property("LIBRARY_VERSION").toString()
 
-val myGroup = "cash.z.ecc.android"
+val myGroup = "io.github.4acha4a"
 project.group = myGroup
 
 plugins.apply(MavenPublishPlugin::class.java)
@@ -29,23 +29,20 @@ extensions.getByType<MavenPublishBaseExtension>().apply {
     )
 
     pom {
-        name.set("Zcash Android Wallet SDK")
-        description.set(
-            "This lightweight SDK connects Android to Zcash, allowing third-party " +
-                "Android apps to send and receive shielded transactions easily, securely and privately."
-        )
-        url.set("https://github.com/zcash/zcash-android-wallet-sdk/")
+        name.set("Hito Zcash Android Wallet SDK")
+        description.set("Zcash Android SDK fork with hardware wallet support.")
+        url.set("https://github.com/4acha4a/zcash-android-wallet-sdk")
         inceptionYear.set("2018")
         scm {
-            url.set("https://github.com/zcash/zcash-android-wallet-sdk/")
-            connection.set("scm:git:git://github.com/zcash/zcash-android-wallet-sdk.git")
-            developerConnection.set("scm:git:ssh://git@github.com/zcash/zcash-android-wallet-sdk.git")
+            url.set("https://github.com/4acha4a/zcash-android-wallet-sdk/")
+            connection.set("scm:git:git://github.com/4acha4a/zcash-android-wallet-sdk.git")
+            developerConnection.set("scm:git:ssh://git@github.com/4acha4a/zcash-android-wallet-sdk.git")
         }
         developers {
             developer {
-                id.set("zcash")
-                name.set("Zcash Open Development Lab")
-                url.set("https://github.com/zcash/")
+                id.set("4acha4a")
+                name.set("Hito Lab")
+                url.set("https://github.com/4acha4a")
             }
         }
         licenses {
