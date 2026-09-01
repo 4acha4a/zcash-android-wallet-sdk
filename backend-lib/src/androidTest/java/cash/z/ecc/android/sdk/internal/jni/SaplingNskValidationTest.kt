@@ -9,7 +9,9 @@ class SaplingNskValidationTest {
         @JvmStatic
         @BeforeClass
         fun loadNativeLibrary() {
-            RustBackend.loadLibrary()
+	    runBlocking {
+            	RustBackend.loadLibrary()
+    	    }
         }
     }
 
