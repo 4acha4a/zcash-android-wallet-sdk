@@ -1,5 +1,6 @@
 package cash.z.ecc.android.sdk.internal.jni
 
+import kotlinx.coroutines.runBlocking
 import org.junit.BeforeClass
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -9,9 +10,9 @@ class SaplingNskValidationTest {
         @JvmStatic
         @BeforeClass
         fun loadNativeLibrary() {
-	    runBlocking {
-            	RustBackend.loadLibrary()
-    	    }
+            runBlocking {
+                RustBackend.loadLibrary()
+            }
         }
     }
 
